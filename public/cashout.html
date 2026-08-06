@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Cash out — Konfirm</title>
+<style>
+  :root {
+    --ink: #0a0908; --surface: #17140f; --surface-2: #1e1a14;
+    --border: #2b251c; --text-hi: #f5f3ee; --text-lo: #b6ada0; --text-faint: #8f8878;
+    --accent: #c3a06a; --accent-ink: #1a1408; --success: #3a9c7d; --error: #d9704a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: var(--ink); color: var(--text-hi);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    padding: 24px;
+  }
+  .card {
+    width: 100%; max-width: 440px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 16px;
+    padding: 32px; box-shadow: 0 24px 60px rgba(0,0,0,0.45);
+  }
+  .top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; }
+  .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; }
+  .brand .mark { width: 22px; height: 22px; border-radius: 6px; background: var(--accent); color: var(--accent-ink); display: flex; align-items: center; justify-content: center; font-size: 13px; }
+  a.back { color: var(--text-faint); font-size: 13px; text-decoration: none; }
+  a.back:hover { color: var(--text-lo); }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { font-size: 14px; color: var(--text-lo); margin: 0 0 22px; }
+
+  .currency-toggle { display: flex; justify-content: center; gap: 8px; margin-bottom: 10px; }
+  .ctoggle {
+    padding: 8px 20px; border-radius: 999px; border: 1px solid var(--border); background: transparent;
+    color: var(--text-lo); font-size: 14px; font-weight: 600; cursor: pointer; font-family: inherit;
+  }
+  .ctoggle:hover { border-color: var(--accent); color: var(--text-hi); }
+  .ctoggle.active { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  .limit-note { text-align: center; font-size: 12.5px; color: var(--text-faint); margin-bottom: 24px; }
+
+  button {
+    width: 100%; padding: 14px; border-radius: 999px; border: none; font-size: 15px; font-weight: 700;
+    background: var(--accent); color: var(--accent-ink); cursor: pointer; margin-bottom: 10px;
+  }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.secondary { background: transparent; border: 1px solid var(--border); color: var(--text-hi); }
+  .status { font-size: 14px; color: var(--text-lo); text-align: center; margin-top: 16px; min-height: 20px; }
+  .status.error { color: var(--error); }
+  .hidden { display: none; }
+
+  .progress { text-align: center; padding: 10px 0; }
+  .progress .spin {
+    width: 32px; height: 32px; border-radius: 50%; margin: 0 auto 18px;
+    border: 3px solid var(--border); border-top-color: var(--accent);
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .progress .spin { animation: none; } }
+  .progress .stage { font-size: 14.5px; color: var(--text-lo); margin-bottom: 6px; }
+  .progress .hint { font-size: 12.5px; color: var(--text-faint); }
+
+  .success-box { text-align: center; padding: 10px 0; }
+  .success-box .tick { width: 56px; height: 56px; border-radius: 50%; background: var(--success); color: var(--ink);
+    display: flex; align-items: center; justify-content: center; font-size: 28px; margin: 0 auto 18px; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="top">
+      <div class="brand"><span class="mark">✓</span> Konfirm</div>
+      <a class="back" href="/activity">← Activity</a>
+    </div>
+
+    <div id="form-view">
+      <h1>Cash out</h1>
+      <p class="sub" id="cashout-sub">Move funds from your Stellar wallet to a bank account through a Stellar anchor partner.</p>
+
+      <div class="currency-toggle" id="currency-toggle">
+        <button type="button" class="ctoggle" data-currency="XLM">XLM</button>
+        <button type="button" class="ctoggle" data-currency="USDC">USDC</button>
+      </div>
+      <div class="limit-note">This test partner accepts between 1–10 units per cash-out.</div>
+
+      <button type="button" id="start-btn">Connect wallet &amp; start cash-out</button>
+      <div class="status" id="status"></div>
+    </div>
+
+    <div id="progress-view" class="progress hidden">
+      <div class="spin"></div>
+      <div class="stage" id="progress-stage">Waiting…</div>
+      <div class="hint" id="progress-hint"></div>
+    </div>
+
+    <div id="success-view" class="success-box hidden">
+      <div class="tick">✓</div>
+      <div style="font-weight:700; font-size:18px; margin-bottom:8px;">Cash-out complete</div>
+      <div style="color:var(--text-lo); font-size:14px; margin-bottom:18px;">Your funds are on their way to your bank.</div>
+      <button type="button" id="another-btn" class="secondary">Start another cash-out</button>
+    </div>
+  </div>
+
+<script type="module">
+  import freighterApi from 'https://esm.sh/@stellar/freighter-api@4';
+
+  const API_BASE = window.location.origin;
+  const HORIZON_URL = "https://horizon-testnet.stellar.org";
+  const el = (id) => document.getElementById(id);
+  const setStatus = (msg, isError) => {
+    const s = el('status');
+    s.textContent = msg;
+    s.className = 'status' + (isError ? ' error' : '');
+  };
+
+  let currency = 'XLM';
+  let merchant;
+  let popup;
+  let paymentSubmitted = false;
+  let cancelled = false;
+
+  function setCurrency(value) {
+    currency = value;
+    document.querySelectorAll('.ctoggle').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.currency === value);
+    });
+  }
+  document.querySelectorAll('.ctoggle').forEach((btn) => {
+    btn.addEventListener('click', () => setCurrency(btn.dataset.currency));
+  });
+  setCurrency(currency);
+
+  function showProgress(stage, hint) {
+    el('form-view').classList.add('hidden');
+    el('progress-view').classList.remove('hidden');
+    el('progress-stage').textContent = stage;
+    el('progress-hint').textContent = hint || '';
+  }
+
+  function showSuccess() {
+    el('progress-view').classList.add('hidden');
+    el('success-view').classList.remove('hidden');
+  }
+
+  function showFormError(msg) {
+    el('progress-view').classList.add('hidden');
+    el('form-view').classList.remove('hidden');
+    setStatus(msg, true);
+    el('start-btn').disabled = false;
+  }
+
+  // Same allowlist pattern as checkout: only our own written messages ever
+  // reach the merchant, raw errors go to the console.
+  function friendlyMessage(err) {
+    const msg = String(err?.message || err || '');
+    if (msg.toLowerCase().includes('freighter') || msg.toLowerCase().includes('wallet')) {
+      return "We couldn't connect to your wallet. Make sure Freighter is installed and unlocked, then try again.";
+    }
+    if (msg.toLowerCase().includes('declined') || msg.toLowerCase().includes('rejected')) {
+      return "You'll need to approve the signature in your wallet to continue.";
+    }
+    return "Something didn't go through with the cash-out partner. Please try again.";
+  }
+
+  const STATUS_COPY = {
+    incomplete: ['Waiting for you to finish the form…', 'Complete the details in the popup window.'],
+    pending_user_transfer_start: ['Confirm the transfer in your wallet…', ''],
+    pending_anchor: ['Your cash-out is processing…', 'The partner is handling the transfer.'],
+    pending_external: ['Your cash-out is processing…', 'The partner is handling the transfer.'],
+    pending_stellar: ['Sending your cash-out…', ''],
+    pending_user: ['Action needed…', 'Check the popup window for a next step.'],
+    on_hold: ['Your cash-out is on hold…', 'The partner may need more information.'],
+  };
+
+  async function pollStatus(token, id) {
+    while (!cancelled) {
+      const res = await fetch(`${API_BASE}/withdrawals/status?token=${encodeURIComponent(token)}&id=${encodeURIComponent(id)}`);
+      const txn = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        showFormError(friendlyMessage(new Error(txn.message)));
+        return;
+      }
+
+      if (txn.status === 'completed') {
+        showSuccess();
+        return;
+      }
+      if (txn.status === 'error' || txn.status === 'expired' || txn.status === 'refunded') {
+        showFormError('The cash-out partner could not complete this one. Please try again.');
+        return;
+      }
+
+      if (txn.status === 'pending_user_transfer_start' && !paymentSubmitted) {
+        paymentSubmitted = true;
+        try {
+          await sendWithdrawalPayment(token, id);
+        } catch (err) {
+          console.error('[konfirm cashout] withdrawal payment failed', err);
+          showFormError(friendlyMessage(err));
+          return;
+        }
+      }
+
+      const copy = STATUS_COPY[txn.status] || ['Working on it…', ''];
+      showProgress(copy[0], copy[1]);
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+  }
+
+  async function sendWithdrawalPayment(token, id) {
+    showProgress('Preparing the transfer…', '');
+    const prepRes = await fetch(`${API_BASE}/withdrawals/prepare-payment`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ currency, token, id }),
+    });
+    const prep = await prepRes.json();
+    if (!prepRes.ok) throw new Error(prep.message || 'could not prepare the transfer');
+
+    showProgress('Approve the transfer in your wallet…', '');
+    const signed = await freighterApi.signTransaction(prep.xdr, {
+      networkPassphrase: prep.network_passphrase,
+      address: merchant.stellar_base_address,
+    });
+    if (signed.error) throw new Error(signed.error);
+
+    showProgress('Sending your cash-out…', '');
+    const submitRes = await fetch(`${HORIZON_URL}/transactions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: `tx=${encodeURIComponent(signed.signedTxXdr)}`,
+    });
+    const submitResult = await submitRes.json();
+    if (!submitRes.ok) {
+      const codes = submitResult.extras?.result_codes;
+      throw new Error(codes ? JSON.stringify(codes) : submitResult.title || 'submission failed');
+    }
+  }
+
+  el('start-btn').addEventListener('click', async () => {
+    const btn = el('start-btn');
+    btn.disabled = true;
+    paymentSubmitted = false;
+    cancelled = false;
+    try {
+      setStatus('Connecting your wallet…');
+      const access = await freighterApi.requestAccess();
+      if (access.error) throw new Error(access.error);
+
+      showProgress('Requesting a secure sign-in…', '');
+      const challengeRes = await fetch(`${API_BASE}/withdrawals/challenge`, { credentials: 'include' });
+      const challenge = await challengeRes.json();
+      if (!challengeRes.ok) throw new Error(challenge.message || 'could not reach the cash-out partner');
+
+      showProgress('Approve the sign-in in your wallet…', '');
+      const signedChallenge = await freighterApi.signTransaction(challenge.transaction, {
+        networkPassphrase: challenge.network_passphrase,
+        address: merchant.stellar_base_address,
+      });
+      if (signedChallenge.error) throw new Error(signedChallenge.error);
+
+      const tokenRes = await fetch(`${API_BASE}/withdrawals/token`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transaction: signedChallenge.signedTxXdr }),
+      });
+      const tokenBody = await tokenRes.json();
+      if (!tokenRes.ok) throw new Error(tokenBody.message || 'the cash-out partner rejected that signature');
+
+      showProgress('Opening the cash-out form…', '');
+      const startRes = await fetch(`${API_BASE}/withdrawals/start`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ currency, token: tokenBody.token }),
+      });
+      const startBody = await startRes.json();
+      if (!startRes.ok) throw new Error(startBody.message || 'could not start a cash-out');
+
+      popup = window.open(startBody.url, 'konfirm-cashout', 'width=460,height=700');
+      pollStatus(tokenBody.token, startBody.id);
+    } catch (err) {
+      console.error('[konfirm cashout]', err);
+      showFormError(friendlyMessage(err));
+    }
+  });
+
+  el('another-btn').addEventListener('click', () => {
+    el('success-view').classList.add('hidden');
+    el('form-view').classList.remove('hidden');
+    el('start-btn').disabled = false;
+    setStatus('');
+  });
+
+  (async function init() {
+    const res = await fetch(`${API_BASE}/auth/me`, { credentials: 'include' });
+    if (!res.ok) {
+      window.location.href = '/login';
+      return;
+    }
+    ({ merchant } = await res.json());
+    if (!merchant.stellar_base_address) {
+      showFormError('Add a Stellar address to your account before cashing out.');
+    }
+  })();
+</script>
+</body>
+</html>

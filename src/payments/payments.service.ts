@@ -1,0 +1,201 @@
+import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import {
+  BASE_FEE,
+  Horizon,
+  Memo,
+  Networks,
+  Operation,
+  TransactionBuilder,
+} from '@stellar/stellar-sdk';
+import { pool } from '../db/pool';
+import { resolveAsset } from '../common/asset';
+
+const execFileAsync = promisify(execFile);
+const HORIZON_URL = 'https://horizon-testnet.stellar.org';
+const COMPLIANCE_CONTRACT_ID = 'CDDVLE2DZQAYFY3Z2Z74TUNNPC4ROUACSBXOB2P64IT75EZFAQXSRSXY';
+
+@Injectable()
+export class PaymentsService {
+  private horizon = new Horizon.Server(HORIZON_URL);
+
+  // Calling the deployed contract via the `stellar` CLI rather than
+  // hand-rolling a Soroban RPC client call — for a pilot this is a
+  // reasonable, low-risk choice; swapping to a direct rpc.Server call is a
+  // real follow-up, not a correctness gap in what this returns today.
+  private async isAllowedOnChain(address: string): Promise<boolean> {
+    try {
+      const { stdout } = await execFileAsync('stellar', [
+        'contract', 'invoke',
+        '--id', COMPLIANCE_CONTRACT_ID,
+        '--source', 'deployer',
+        '--network', 'testnet',
+        '--', 'is_allowed', '--addr', address,
+      ]);
+      return stdout.trim() === 'true';
+    } catch (err) {
+      // Fail open, loudly — matches the documented invariant: an
+      // unreachable compliance check must never silently block checkout,
+      // but it must never be silent about it either.
+      // eslint-disable-next-line no-console
+      console.warn('[compliance] on-chain check unreachable, failing open:', err);
+      return true;
+    }
+  }
+
+  // Shared by both signing paths (Freighter's prepared-XDR flow and the QR
+  // code's SEP-7 payment-request flow) so a link's active/expiry/amount
+  // rules can't drift between them.
+  private async loadPayableLink(linkId: string) {
+    const linkRes = await pool.query(
+      `SELECT l.id, l.amount_usdc, l.currency, l.active, l.expires_at, m.stellar_base_address
+       FROM links l JOIN merchants m ON m.id = l.merchant_id
+       WHERE l.id = $1`,
+      [linkId],
+    );
+    if (linkRes.rows.length === 0) throw new NotFoundException('link not found');
+    const link = linkRes.rows[0];
+    if (!link.active) throw new BadRequestException('link is not active');
+    if (link.expires_at && new Date(link.expires_at) < new Date()) {
+      throw new BadRequestException('link has expired');
+    }
+    if (!link.amount_usdc) {
+      throw new BadRequestException('pay-what-you-want links need an amount param (not yet implemented)');
+    }
+    if (!link.stellar_base_address) {
+      throw new BadRequestException('merchant has no Stellar address configured');
+    }
+    return link;
+  }
+
+  async prepareTx(linkId: string, muxedId: string, payerAddress: string) {
+    const link = await this.loadPayableLink(linkId);
+
+    // Compliance screening happens before any XDR is built — a blocked
+    // address must never receive a transaction to sign.
+    const allowed = await this.isAllowedOnChain(payerAddress);
+    if (!allowed) {
+      throw new ForbiddenException('this address is not permitted to pay');
+    }
+
+    // The session/link id used to travel as a muxed (M...) destination
+    // address. Freighter's own extension has open, active bugs in its
+    // muxed-account decode path (stellar/freighter#2841, #2856, #2863) that
+    // crash its transaction-confirm UI with "Cannot read properties of
+    // undefined (reading 'fromAddress')" — a bug in the wallet, not
+    // something fixable from here. A plain destination plus a MEMO_ID
+    // carrying the same session id is the well-supported alternative every
+    // wallet already knows how to render.
+    const destination = link.stellar_base_address;
+    const asset = resolveAsset(link.currency);
+
+    const payerAccount = await this.horizon.loadAccount(payerAddress);
+    const builder = new TransactionBuilder(payerAccount, {
+      fee: BASE_FEE,
+      networkPassphrase: Networks.TESTNET,
+    });
+
+    // Stellar requires an explicit trustline before an account can hold a
+    // non-native asset — a payer's first-ever USDC payment would otherwise
+    // fail on-chain with op_no_trust. Bundling ChangeTrust into the same
+    // transaction as the Payment keeps this a single sign-and-send instead
+    // of a separate setup step the payer has to know to do first.
+    if (!asset.isNative()) {
+      const balances = payerAccount.balances as Array<{ asset_code?: string; asset_issuer?: string }>;
+      const hasTrustline = balances.some(
+        (b) => b.asset_code === asset.getCode() && b.asset_issuer === asset.getIssuer(),
+      );
+      if (!hasTrustline) {
+        builder.addOperation(Operation.changeTrust({ asset }));
+      }
+    }
+
+    const tx = builder
+      .addOperation(
+        Operation.payment({
+          destination,
+          asset,
+          amount: link.amount_usdc.toString(),
+        }),
+      )
+      .addMemo(Memo.id(muxedId))
+      .setTimeout(60)
+      .build();
+
+    return {
+      xdr: tx.toXDR(),
+      network_passphrase: Networks.TESTNET,
+      destination,
+    };
+  }
+
+  // SEP-7's `pay` operation, for the QR-code / mobile-wallet path. Unlike
+  // prepareTx, this never touches the payer's account — a Stellar
+  // transaction is built around a fixed source account and sequence number,
+  // which we can't know before the payer's own wallet is the one building
+  // it. `pay` sidesteps that entirely: the wallet fills in its own account
+  // once the person scanning approves, so no pre-built XDR and no
+  // compliance pre-check are possible here (there's no address to check
+  // yet) — only the destination, asset, amount, and memo are fixed ahead of
+  // time. A wallet lacking a USDC trustline is expected to prompt for one
+  // itself; SEP-7 has no equivalent to bundling ChangeTrust in advance.
+  async buildPayUri(linkId: string, muxedId: string): Promise<{ uri: string }> {
+    const link = await this.loadPayableLink(linkId);
+    const asset = resolveAsset(link.currency);
+
+    const parts = [
+      `destination=${encodeURIComponent(link.stellar_base_address)}`,
+      `amount=${encodeURIComponent(link.amount_usdc.toString())}`,
+    ];
+    const issuer = asset.getIssuer();
+    if (!asset.isNative() && issuer) {
+      parts.push(`asset_code=${encodeURIComponent(asset.getCode())}`);
+      parts.push(`asset_issuer=${encodeURIComponent(issuer)}`);
+    }
+    parts.push(`memo=${encodeURIComponent(muxedId)}`);
+    parts.push(`memo_type=MEMO_ID`);
+    parts.push(`network_passphrase=${encodeURIComponent(Networks.TESTNET)}`);
+
+    return { uri: `web+stellar:pay?${parts.join('&')}` };
+  }
+
+  async listByMerchantAddress(stellarAddress: string) {
+    const { rows } = await pool.query(
+      `SELECT p.id, p.muxed_id, p.amount_usdc, p.fee_usdc, p.net_usdc,
+              p.asset_code, p.payer_address, p.tx_hash, p.created_at,
+              l.description AS link_description
+       FROM payments p
+       JOIN merchants m ON m.id = p.merchant_id
+       LEFT JOIN links l ON l.id = p.link_id
+       WHERE m.stellar_base_address = $1
+       ORDER BY p.created_at DESC
+       LIMIT 25`,
+      [stellarAddress],
+    );
+    return rows;
+  }
+
+  // A real signal, not a fake spinner: a session was reserved (the payer
+  // clicked "Connect & Pay" and got past compliance screening) but no
+  // matching payment has landed yet. True for the handful of seconds
+  // between "submitted" and "confirmed" — exactly the gap where silence
+  // on the merchant's screen would read as broken rather than working.
+  async hasPendingSession(stellarAddress: string) {
+    const { rows } = await pool.query(
+      `SELECT ls.muxed_id, ls.created_at
+       FROM link_sessions ls
+       JOIN merchants m ON m.id = ls.merchant_id
+       WHERE m.stellar_base_address = $1
+         AND ls.created_at > NOW() - INTERVAL '3 minutes'
+         AND NOT EXISTS (
+           SELECT 1 FROM payments p
+           WHERE p.merchant_id = ls.merchant_id AND p.muxed_id = ls.muxed_id
+         )
+       ORDER BY ls.created_at DESC
+       LIMIT 1`,
+      [stellarAddress],
+    );
+    return { pending: rows.length > 0, since: rows[0]?.created_at ?? null };
+  }
+}

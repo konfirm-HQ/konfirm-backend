@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Pay — Konfirm</title>
+<style>
+  :root {
+    --ink: #0a0908; --surface: #17140f; --surface-2: #1e1a14;
+    --border: #2b251c; --text-hi: #f5f3ee; --text-lo: #b6ada0; --text-faint: #8f8878;
+    --accent: #c3a06a; --accent-ink: #1a1408; --success: #3a9c7d; --error: #d9704a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: var(--ink); color: var(--text-hi);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    padding: 24px;
+  }
+  .card {
+    width: 100%; max-width: 420px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 16px;
+    padding: 32px; box-shadow: 0 24px 60px rgba(0,0,0,0.45);
+  }
+  .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; margin-bottom: 24px; }
+  .brand .mark { width: 22px; height: 22px; border-radius: 6px; background: var(--accent); color: var(--accent-ink); display: flex; align-items: center; justify-content: center; font-size: 13px; }
+  .merchant { font-size: 13px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 6px; }
+  .desc { font-size: 16px; color: var(--text-lo); margin-bottom: 18px; }
+  .amount { font-size: 42px; font-weight: 800; letter-spacing: -0.01em; margin-bottom: 28px; font-variant-numeric: tabular-nums; }
+  button {
+    width: 100%; padding: 14px; border-radius: 999px; border: none; font-size: 15px; font-weight: 700;
+    background: var(--accent); color: var(--accent-ink); cursor: pointer; margin-bottom: 10px;
+  }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.secondary { background: transparent; border: 1px solid var(--border); color: var(--text-hi); }
+  .status { font-size: 14px; color: var(--text-lo); text-align: center; margin-top: 16px; min-height: 20px; }
+  .status.error { color: var(--error); }
+  .qr-section { text-align: center; margin-bottom: 20px; }
+  .qr-label { font-size: 13px; color: var(--text-lo); margin-bottom: 12px; }
+  a.qr-box {
+    display: inline-block; background: #fff; padding: 12px; border-radius: 12px; line-height: 0;
+  }
+  .qr-box svg { display: block; width: 172px; height: 172px; }
+  .qr-hint { font-size: 12px; color: var(--text-faint); margin-top: 10px; }
+  .divider {
+    display: flex; align-items: center; gap: 12px; margin: 4px 0 20px;
+    color: var(--text-faint); font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.06em;
+  }
+  .divider::before, .divider::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+  .success-box { text-align: center; padding: 20px 0; }
+  .success-box .tick { width: 56px; height: 56px; border-radius: 50%; background: var(--success); color: var(--ink);
+    display: flex; align-items: center; justify-content: center; font-size: 28px; margin: 0 auto 18px; }
+  .hidden { display: none; }
+  a.txlink { color: var(--accent); font-size: 13px; word-break: break-all; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="brand"><span class="mark">✓</span> Konfirm</div>
+
+    <div id="loading">Loading…</div>
+
+    <div id="checkout" class="hidden">
+      <div class="merchant" id="merchant-name"></div>
+      <div class="desc" id="link-desc"></div>
+      <div class="amount" id="link-amount"></div>
+
+      <div class="qr-section" id="qr-section">
+        <div class="qr-label">Scan with your Stellar wallet</div>
+        <a class="qr-box" id="qr-box" href="#" target="_blank" rel="noopener"></a>
+        <div class="qr-hint">Lobstr, Vibrant, Beans, xBull, and others</div>
+      </div>
+      <div class="divider">or</div>
+
+      <button id="connect-btn">Connect Freighter &amp; Pay</button>
+      <div class="status" id="status"></div>
+    </div>
+
+    <div id="success" class="success-box hidden">
+      <div class="tick">✓</div>
+      <div style="font-weight:700; font-size:18px; margin-bottom:8px;">Konfirmed</div>
+      <div style="color:var(--text-lo); font-size:14px; margin-bottom:14px;">Your payment landed and was konfirmed on-chain.</div>
+      <a class="txlink" id="tx-link" href="#" target="_blank" rel="noopener"></a>
+    </div>
+  </div>
+
+<script src="/vendor/qrcode.js"></script>
+<script type="module">
+  // No stellar-sdk import — every place this page used to lean on it
+  // (deriving addresses, parsing/submitting XDR) turned out to be
+  // guessable-CDN-shape risk this environment had no way to verify ahead
+  // of time. Freighter's own API plus plain fetch calls cover everything
+  // actually needed.
+  import freighterApi from 'https://esm.sh/@stellar/freighter-api@4';
+
+  const LINK_ID = "%%LINK_ID%%";
+  const API_BASE = window.location.origin;
+  const HORIZON_URL = "https://horizon-testnet.stellar.org";
+
+  const el = (id) => document.getElementById(id);
+  const setStatus = (msg, isError) => {
+    const s = el('status');
+    s.textContent = msg;
+    s.className = 'status' + (isError ? ' error' : '');
+  };
+
+  function randomMuxedId() {
+    const buf = new Uint32Array(2);
+    crypto.getRandomValues(buf);
+    // Keep it within the positive int64 range Soroban/Stellar expect.
+    const high = BigInt(buf[0] & 0x7fffffff);
+    const low = BigInt(buf[1]);
+    return ((high << 32n) | low).toString();
+  }
+
+  let linkData;
+  let sharedMuxedId;
+  let alreadyConfirmed = false;
+
+  async function loadLink() {
+    const res = await fetch(`${API_BASE}/links/${LINK_ID}/public`);
+    if (!res.ok) {
+      el('loading').textContent = 'This payment link could not be found.';
+      return false;
+    }
+    linkData = await res.json();
+    el('merchant-name').textContent = linkData.merchant_name;
+    el('link-desc').textContent = linkData.description || 'Payment';
+    const amountStr = Number(linkData.amount_usdc).toFixed(2);
+    el('link-amount').textContent = linkData.currency === 'USDC' ? `$${amountStr}` : `${amountStr} ${linkData.currency}`;
+    el('loading').classList.add('hidden');
+    el('checkout').classList.remove('hidden');
+    return true;
+  }
+
+  function showSuccess(confirmed) {
+    if (alreadyConfirmed) return; // either path can win; only act on the first
+    alreadyConfirmed = true;
+    el('checkout').classList.add('hidden');
+    el('success').classList.remove('hidden');
+    const link = el('tx-link');
+    link.href = `https://stellar.expert/explorer/testnet/tx/${confirmed.tx_hash}`;
+    link.textContent = `View on stellar.expert →`;
+  }
+
+  async function pollForConfirmation(merchantAddress, muxedId, attempts, intervalMs) {
+    for (let i = 0; i < attempts; i++) {
+      if (alreadyConfirmed) return null;
+      const res = await fetch(`${API_BASE}/payments/by-merchant/${merchantAddress}`);
+      const payments = await res.json();
+      const match = payments.find((p) => String(p.muxed_id) === muxedId);
+      if (match) return match;
+      await new Promise((r) => setTimeout(r, intervalMs));
+    }
+    return null;
+  }
+
+  // Renders the SEP-7 `web+stellar:pay` request as a scannable QR code and
+  // makes the same URI directly tappable — on a phone that already has a
+  // Stellar wallet installed, tapping opens it without needing a camera at
+  // all. Falls back to hiding this option if it can't be built, since
+  // Freighter still works on its own.
+  async function setupQrPayment(muxedId) {
+    try {
+      const res = await fetch(`${API_BASE}/payments/pay-uri?linkId=${LINK_ID}&muxed_id=${muxedId}`);
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.message || 'could not build a payment request');
+      const qr = qrcode(0, 'M');
+      qr.addData(body.uri);
+      qr.make();
+      const box = el('qr-box');
+      box.innerHTML = qr.createSvgTag(5, 8);
+      box.href = body.uri;
+    } catch (err) {
+      console.error('[konfirm checkout] QR setup failed', err);
+      el('qr-section').classList.add('hidden');
+      document.querySelector('.divider').classList.add('hidden');
+    }
+  }
+
+  // The one server round trip reserves the payer-chosen muxed_id against
+  // this Link. A collision is astronomically unlikely with a real random
+  // 64-bit value, but the correct response was always "pick a new one and
+  // retry" — this is that retry, actually wired up client-side instead of
+  // just documented as the expected behavior.
+  async function reserveSessionWithRetry(maxAttempts = 3) {
+    let lastError;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const candidateId = randomMuxedId();
+      const res = await fetch(`${API_BASE}/links/${LINK_ID}/sessions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ muxed_id: candidateId }),
+      });
+      if (res.ok) return candidateId;
+      const body = await res.json().catch(() => ({}));
+      lastError = new Error(body.message || 'session reservation failed');
+      if (res.status !== 409) throw lastError; // only retry on a genuine collision
+    }
+    throw lastError;
+  }
+
+  // Every status line here is written for the person paying, not for
+  // whoever's debugging this later — no "session," "reconciler," or
+  // "screening" ever reaches this screen. Technical detail still goes to
+  // the console, where it belongs.
+  const STAGE = {
+    CONNECT: 'Connecting your wallet…',
+    PREP: 'Preparing your payment…',
+    SIGN: 'Approve the payment in your wallet…',
+    SEND: 'Sending your payment…',
+    CONFIRM: 'Konfirming…',
+  };
+
+  // An explicit allowlist of our own, deliberately human-written messages.
+  // Anything not on this list is by definition a technical detail that
+  // should never reach a customer's screen — it falls through to the
+  // generic message instead, with the real error still logged to console.
+  function friendlyMessage(err) {
+    const msg = String(err?.message || err || '');
+    const knownSafe = [
+      'link is not active',
+      'link has expired',
+      'link not found',
+      'this address is not permitted to pay',
+      'pay-what-you-want links need an amount',
+    ];
+    if (knownSafe.some((s) => msg.toLowerCase().includes(s))) return msg;
+    if (msg.toLowerCase().includes('declined') || msg.toLowerCase().includes('rejected')) {
+      return "You'll need to approve the payment in your wallet to continue.";
+    }
+    if (msg.toLowerCase().includes('freighter') || msg.toLowerCase().includes('wallet')) {
+      return "We couldn't connect to your wallet. Make sure Freighter is installed and unlocked, then try again.";
+    }
+    return "Something didn't go through on our end. Please try again.";
+  }
+
+  el('connect-btn').addEventListener('click', async () => {
+    const btn = el('connect-btn');
+    btn.disabled = true;
+    try {
+      setStatus(STAGE.CONNECT);
+      const access = await freighterApi.requestAccess();
+      if (access.error) throw new Error(access.error);
+      const payerAddress = access.address;
+
+      setStatus(STAGE.PREP);
+      // Reserved once for the whole checkout (see initPayment below) so the
+      // QR code and this button are racing toward the same session, not two
+      // different ones — whichever the payer actually completes is the one
+      // that lands.
+      const muxedId = sharedMuxedId;
+
+      const prepRes = await fetch(
+        `${API_BASE}/payments/prepare-tx?linkId=${LINK_ID}&muxed_id=${muxedId}&payer=${payerAddress}`,
+      );
+      const prep = await prepRes.json();
+      if (!prepRes.ok) throw new Error(prep.message || 'could not prepare transaction');
+
+      setStatus(STAGE.SIGN);
+      const signed = await freighterApi.signTransaction(prep.xdr, {
+        networkPassphrase: prep.network_passphrase,
+        address: payerAddress,
+      });
+      if (signed.error) throw new Error(signed.error);
+
+      setStatus(STAGE.SEND);
+      // Raw Horizon REST call rather than the SDK's Server class — this
+      // environment has no browser to verify which export shape a given
+      // stellar-sdk CDN build exposes, and the plain HTTP submission
+      // endpoint has been stable for years. Fewer moving parts to be wrong
+      // about.
+      const submitRes = await fetch(`${HORIZON_URL}/transactions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: `tx=${encodeURIComponent(signed.signedTxXdr)}`,
+      });
+      const submitResult = await submitRes.json();
+      if (!submitRes.ok) {
+        const codes = submitResult.extras?.result_codes;
+        throw new Error(codes ? JSON.stringify(codes) : submitResult.title || 'submission failed');
+      }
+
+      setStatus(STAGE.CONFIRM);
+      // Already have the merchant's base address from /links/:id/public —
+      // no need to decode it back out of the muxed address client-side,
+      // which is the second time this session a CDN-loaded SDK shape
+      // turned out to be the wrong thing to depend on for something this
+      // simple. Short, bounded wait here — Horizon's submit call above only
+      // returns once the transaction is already in a ledger, so this is
+      // just waiting on our own reconciler to notice, typically a few
+      // seconds. The QR path's own watcher (started on page load) has no
+      // such deadline, since we have no idea when someone might actually
+      // finish scanning.
+      const confirmed = await pollForConfirmation(linkData.stellar_base_address, muxedId, 40, 2000);
+
+      if (confirmed) {
+        showSuccess(confirmed);
+      } else {
+        setStatus("Your payment was sent and is still konfirming — this can take a little longer sometimes. Feel free to check back.", true);
+      }
+    } catch (err) {
+      console.error('[konfirm checkout]', err);
+      setStatus(friendlyMessage(err), true);
+      btn.disabled = false;
+    }
+  });
+
+  // One session, reserved as soon as the link loads, shared by both payment
+  // paths — the QR code is scannable immediately rather than gated behind a
+  // button, and an ambient watcher picks up whichever path the payer
+  // actually finishes.
+  async function initPayment() {
+    try {
+      sharedMuxedId = await reserveSessionWithRetry();
+    } catch (err) {
+      console.error('[konfirm checkout] could not reserve a payment session', err);
+      setStatus(friendlyMessage(err), true);
+      el('connect-btn').disabled = true;
+      el('qr-section').classList.add('hidden');
+      document.querySelector('.divider').classList.add('hidden');
+      return;
+    }
+    await setupQrPayment(sharedMuxedId);
+    // Long, silent watch — up to 10 minutes — for the QR/mobile-wallet path,
+    // which has no "just submitted" moment to bound the wait against.
+    pollForConfirmation(linkData.stellar_base_address, sharedMuxedId, 300, 2000).then((confirmed) => {
+      if (confirmed) showSuccess(confirmed);
+    });
+  }
+
+  loadLink().then((ok) => { if (ok) initPayment(); });
+</script>
+</body>
+</html>

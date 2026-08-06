@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Request a payment — Konfirm</title>
+<style>
+  :root {
+    --ink: #0a0908; --surface: #17140f; --surface-2: #1e1a14;
+    --border: #2b251c; --text-hi: #f5f3ee; --text-lo: #b6ada0; --text-faint: #8f8878;
+    --accent: #c3a06a; --accent-ink: #1a1408; --success: #3a9c7d; --error: #d9704a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: var(--ink); color: var(--text-hi);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    padding: 24px;
+  }
+  .card {
+    width: 100%; max-width: 440px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 16px;
+    padding: 32px; box-shadow: 0 24px 60px rgba(0,0,0,0.45);
+  }
+  .top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; }
+  .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; }
+  .brand .mark { width: 22px; height: 22px; border-radius: 6px; background: var(--accent); color: var(--accent-ink); display: flex; align-items: center; justify-content: center; font-size: 13px; }
+  a.back { color: var(--text-faint); font-size: 13px; text-decoration: none; }
+  a.back:hover { color: var(--text-lo); }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { font-size: 14px; color: var(--text-lo); margin: 0 0 28px; }
+
+  .amount-row { display: flex; align-items: baseline; justify-content: center; gap: 4px; margin-bottom: 8px; }
+  .amount-row .dollar { font-size: 32px; font-weight: 800; color: var(--text-faint); }
+  .amount-row .dollar.hidden { display: none; }
+  input#amount {
+    width: 100%; max-width: 220px; border: none; background: transparent; color: var(--text-hi);
+    font-size: 56px; font-weight: 800; letter-spacing: -0.01em; text-align: center;
+    font-variant-numeric: tabular-nums; padding: 0;
+  }
+  input#amount:focus { outline: none; }
+  .currency-toggle { display: flex; justify-content: center; gap: 8px; margin-bottom: 28px; }
+  .ctoggle {
+    padding: 6px 16px; border-radius: 999px; border: 1px solid var(--border); background: transparent;
+    color: var(--text-lo); font-size: 13px; font-weight: 600; cursor: pointer; font-family: inherit;
+  }
+  .ctoggle:hover { border-color: var(--accent); color: var(--text-hi); }
+  .ctoggle.active { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+
+  label { display: block; font-size: 13px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 8px; }
+  .field { margin-bottom: 22px; }
+  input#desc {
+    width: 100%; padding: 12px 14px; border-radius: 10px; border: 1px solid var(--border);
+    background: var(--surface-2); color: var(--text-hi); font-size: 15px; font-family: inherit;
+  }
+  input#desc:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .chips { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  .chip {
+    padding: 6px 14px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-2);
+    color: var(--text-lo); font-size: 13px; cursor: pointer;
+  }
+  .chip:hover { border-color: var(--accent); color: var(--text-hi); }
+
+  button {
+    width: 100%; padding: 14px; border-radius: 999px; border: none; font-size: 15px; font-weight: 700;
+    background: var(--accent); color: var(--accent-ink); cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .status { font-size: 14px; color: var(--error); text-align: center; margin-top: 14px; min-height: 20px; }
+  .hidden { display: none; }
+
+  .result { text-align: center; }
+  .result .tick { width: 56px; height: 56px; border-radius: 50%; background: var(--success); color: var(--ink);
+    display: flex; align-items: center; justify-content: center; font-size: 28px; margin: 0 auto 18px; }
+  .link-box {
+    display: flex; align-items: center; gap: 8px; background: var(--surface-2); border: 1px solid var(--border);
+    border-radius: 10px; padding: 10px 12px; margin: 18px 0; text-align: left;
+  }
+  .link-box span { flex: 1; font-size: 13px; color: var(--text-lo); word-break: break-all; }
+  .link-box button { width: auto; padding: 8px 14px; font-size: 13px; margin: 0; flex: none; }
+  .result .secondary {
+    background: transparent; border: 1px solid var(--border); color: var(--text-hi); margin-top: 10px;
+  }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="top">
+      <div class="brand"><span class="mark">✓</span> Konfirm</div>
+      <a class="back" href="/activity">← Activity</a>
+    </div>
+
+    <div id="form-view">
+      <h1>Request a payment</h1>
+      <p class="sub" id="merchant-sub">Create a link you can send anyone.</p>
+
+      <div class="amount-row">
+        <span class="dollar" id="dollar-sign">$</span>
+        <input id="amount" type="text" inputmode="decimal" placeholder="0.00" autofocus />
+      </div>
+      <div class="currency-toggle" id="currency-toggle">
+        <button type="button" class="ctoggle" data-currency="XLM">XLM</button>
+        <button type="button" class="ctoggle" data-currency="USDC">USDC</button>
+      </div>
+
+      <div class="field">
+        <label for="desc">What's it for?</label>
+        <input id="desc" type="text" placeholder="e.g. A gift for Mom" maxlength="200" />
+        <div class="chips">
+          <div class="chip" data-fill="Gift">Gift</div>
+          <div class="chip" data-fill="Payment">Payment</div>
+          <div class="chip" data-fill="Service">Service</div>
+        </div>
+      </div>
+
+      <button type="button" id="submit-btn">Create payment link</button>
+      <div class="status" id="status"></div>
+    </div>
+
+    <div id="result-view" class="result hidden">
+      <div class="tick">✓</div>
+      <div style="font-weight:700; font-size:18px; margin-bottom:6px;">Ready to send</div>
+      <div style="color:var(--text-lo); font-size:14px;">Share this link, or open it yourself to test it now.</div>
+      <div class="link-box">
+        <span id="link-url"></span>
+        <button type="button" id="copy-btn">Copy</button>
+      </div>
+      <button type="button" id="open-btn">Open checkout</button>
+      <button type="button" id="another-btn" class="secondary">Request another payment</button>
+    </div>
+  </div>
+
+<script>
+  const el = (id) => document.getElementById(id);
+  let linkUrl = '';
+  // XLM by default — a payer's wallet is guaranteed to hold it, where a
+  // first-ever USDC payment needs a trustline (handled server-side, but
+  // still an extra signature step) before it can land.
+  let currency = 'XLM';
+
+  function setCurrency(value) {
+    currency = value;
+    document.querySelectorAll('.ctoggle').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.currency === value);
+    });
+    el('dollar-sign').classList.toggle('hidden', value !== 'USDC');
+  }
+  document.querySelectorAll('.ctoggle').forEach((btn) => {
+    btn.addEventListener('click', () => setCurrency(btn.dataset.currency));
+  });
+  setCurrency(currency);
+
+  (async function checkSession() {
+    const res = await fetch('/auth/me', { credentials: 'include' });
+    if (!res.ok) {
+      window.location.href = '/login';
+      return;
+    }
+    const { merchant } = await res.json();
+    el('merchant-sub').textContent = `Create a link you can send anyone — from ${merchant.name}.`;
+  })();
+
+  document.querySelectorAll('.chip').forEach((chip) => {
+    chip.addEventListener('click', () => { el('desc').value = chip.dataset.fill; });
+  });
+
+  el('submit-btn').addEventListener('click', async () => {
+    const btn = el('submit-btn');
+    const amountRaw = el('amount').value.trim();
+    el('status').textContent = '';
+
+    const amount = Number(amountRaw);
+    if (!amountRaw || !Number.isFinite(amount) || amount <= 0) {
+      el('status').textContent = 'Enter an amount greater than 0.';
+      return;
+    }
+
+    btn.disabled = true;
+    try {
+      const res = await fetch('/links', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          amount_usdc: amount.toFixed(2),
+          currency,
+          description: el('desc').value.trim() || undefined,
+        }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (res.status === 401) {
+        window.location.href = '/login';
+        return;
+      }
+      if (!res.ok) {
+        throw new Error(typeof body.message === 'string' ? body.message : 'Could not create that payment link.');
+      }
+
+      linkUrl = `${window.location.origin}/pay/${body.id}`;
+      el('link-url').textContent = linkUrl;
+      el('form-view').classList.add('hidden');
+      el('result-view').classList.remove('hidden');
+    } catch (err) {
+      console.error('[konfirm new-payment]', err);
+      el('status').textContent = err.message || 'Something went wrong. Please try again.';
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  el('copy-btn').addEventListener('click', async () => {
+    await navigator.clipboard.writeText(linkUrl);
+    const btn = el('copy-btn');
+    const original = btn.textContent;
+    btn.textContent = 'Copied';
+    setTimeout(() => { btn.textContent = original; }, 1500);
+  });
+
+  el('open-btn').addEventListener('click', () => { window.location.href = linkUrl; });
+
+  el('another-btn').addEventListener('click', () => {
+    el('amount').value = '';
+    el('desc').value = '';
+    el('result-view').classList.add('hidden');
+    el('form-view').classList.remove('hidden');
+    el('amount').focus();
+  });
+</script>
+</body>
+</html>

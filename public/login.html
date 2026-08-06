@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Log in — Konfirm</title>
+<style>
+  :root {
+    --ink: #0a0908; --surface: #17140f; --surface-2: #1e1a14;
+    --border: #2b251c; --text-hi: #f5f3ee; --text-lo: #b6ada0; --text-faint: #8f8878;
+    --accent: #c3a06a; --accent-ink: #1a1408; --error: #d9704a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: var(--ink); color: var(--text-hi);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    padding: 24px;
+  }
+  .card {
+    width: 100%; max-width: 400px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 16px;
+    padding: 32px; box-shadow: 0 24px 60px rgba(0,0,0,0.45);
+  }
+  .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; margin-bottom: 24px; }
+  .brand .mark { width: 22px; height: 22px; border-radius: 6px; background: var(--accent); color: var(--accent-ink); display: flex; align-items: center; justify-content: center; font-size: 13px; }
+  h1 { font-size: 22px; margin: 0 0 22px; }
+  label { display: block; font-size: 13px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 6px; }
+  .field { margin-bottom: 16px; }
+  input {
+    width: 100%; padding: 12px 14px; border-radius: 10px; border: 1px solid var(--border);
+    background: var(--surface-2); color: var(--text-hi); font-size: 15px;
+  }
+  input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  button {
+    width: 100%; padding: 14px; border-radius: 999px; border: none; font-size: 15px; font-weight: 700;
+    background: var(--accent); color: var(--accent-ink); cursor: pointer; margin-top: 6px;
+  }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .status { font-size: 14px; color: var(--error); text-align: center; margin-top: 14px; min-height: 20px; }
+  .footer { text-align: center; font-size: 14px; color: var(--text-lo); margin-top: 20px; }
+  .footer a { color: var(--accent); text-decoration: none; }
+  .footer a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="brand"><span class="mark">✓</span> Konfirm</div>
+    <h1>Log in</h1>
+    <form id="login-form">
+      <div class="field">
+        <label for="email">Email</label>
+        <input id="email" type="email" autocomplete="email" required />
+      </div>
+      <div class="field">
+        <label for="password">Password</label>
+        <input id="password" type="password" autocomplete="current-password" required />
+      </div>
+      <button type="submit" id="submit-btn">Log in</button>
+      <div class="status" id="status"></div>
+    </form>
+    <div class="footer">New here? <a href="/signup">Create an account</a></div>
+  </div>
+
+<script>
+  const el = (id) => document.getElementById(id);
+
+  el('login-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = el('submit-btn');
+    btn.disabled = true;
+    el('status').textContent = '';
+    try {
+      const res = await fetch('/auth/login', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: el('email').value, password: el('password').value }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(typeof body.message === 'string' ? body.message : 'Could not log in. Please try again.');
+      }
+      window.location.href = '/activity';
+    } catch (err) {
+      console.error('[konfirm login]', err);
+      el('status').textContent = err.message || 'Could not log in. Please try again.';
+      btn.disabled = false;
+    }
+  });
+</script>
+</body>
+</html>
