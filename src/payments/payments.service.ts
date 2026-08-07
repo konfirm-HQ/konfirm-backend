@@ -11,6 +11,7 @@ import {
 } from '@stellar/stellar-sdk';
 import { pool } from '../db/pool';
 import { resolveAsset } from '../common/asset';
+import { withRetry } from '../common/retry';
 
 const execFileAsync = promisify(execFile);
 const HORIZON_URL = 'https://horizon-testnet.stellar.org';
@@ -26,13 +27,19 @@ export class PaymentsService {
   // real follow-up, not a correctness gap in what this returns today.
   private async isAllowedOnChain(address: string): Promise<boolean> {
     try {
-      const { stdout } = await execFileAsync('stellar', [
-        'contract', 'invoke',
-        '--id', COMPLIANCE_CONTRACT_ID,
-        '--source', 'deployer',
-        '--network', 'testnet',
-        '--', 'is_allowed', '--addr', address,
-      ]);
+      // A native execFile timeout really kills the child process (unlike a
+      // Promise-based race, which would just stop waiting on it) — paired
+      // with one retry for a single transient blip before falling through
+      // to the documented fail-open behavior below.
+      const { stdout } = await withRetry(
+        () =>
+          execFileAsync(
+            'stellar',
+            ['contract', 'invoke', '--id', COMPLIANCE_CONTRACT_ID, '--source', 'deployer', '--network', 'testnet', '--', 'is_allowed', '--addr', address],
+            { timeout: 8_000 },
+          ),
+        { retries: 1, baseDelayMs: 500, timeoutMs: 9_000 },
+      );
       return stdout.trim() === 'true';
     } catch (err) {
       // Fail open, loudly — matches the documented invariant: an
@@ -90,7 +97,10 @@ export class PaymentsService {
     const destination = link.stellar_base_address;
     const asset = resolveAsset(link.currency);
 
-    const payerAccount = await this.horizon.loadAccount(payerAddress);
+    // A read, safe to retry — unlike a POST that creates state on an
+    // external service, asking Horizon for account details twice has no
+    // side effect if the first attempt actually landed.
+    const payerAccount = await withRetry(() => this.horizon.loadAccount(payerAddress), { retries: 2, timeoutMs: 8_000 });
     const builder = new TransactionBuilder(payerAccount, {
       fee: BASE_FEE,
       networkPassphrase: Networks.TESTNET,

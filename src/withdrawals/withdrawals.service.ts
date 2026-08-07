@@ -1,6 +1,9 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { BASE_FEE, Horizon, Memo, Networks, Operation, TransactionBuilder } from '@stellar/stellar-sdk';
 import { resolveAsset } from '../common/asset';
+import { fetchWithRetry, withRetry } from '../common/retry';
+
+const FETCH_TIMEOUT_MS = 10_000;
 
 // Stellar's own reference/demo anchor — SEP-1 discovery at
 // https://testanchor.stellar.org/.well-known/stellar.toml confirms it speaks
@@ -28,22 +31,32 @@ export class WithdrawalsService {
   // SEP-10 step 1: the anchor hands back a challenge transaction (sequence
   // number 0, never submitted to the network) that only the account holder
   // can meaningfully sign — Konfirm never holds that key, so this always
-  // has to round-trip through the merchant's own wallet.
+  // has to round-trip through the merchant's own wallet. A GET with no
+  // side effects — safe to retry freely (fetchWithRetry only retries
+  // transport failures and 5xx; a 4xx here always means the same thing
+  // twice, so it's returned immediately).
   async getChallenge(account: string) {
-    const res = await fetch(`${WEB_AUTH_ENDPOINT}?account=${encodeURIComponent(account)}`);
+    const res = await fetchWithRetry(`${WEB_AUTH_ENDPOINT}?account=${encodeURIComponent(account)}`, {}, { timeoutMs: FETCH_TIMEOUT_MS });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new BadRequestException(body.error || 'could not reach the cash-out partner');
     return body;
   }
 
   // SEP-10 step 2: hand the merchant-signed challenge back to the anchor in
-  // exchange for a session JWT scoped to that account.
+  // exchange for a session JWT scoped to that account. One retry only —
+  // re-submitting the same already-signed challenge is safe (the anchor
+  // either issues the token again or rejects a used one), but this is a
+  // POST, so it doesn't get the same free retry budget as a plain read.
   async exchangeToken(signedTransaction: string) {
-    const res = await fetch(WEB_AUTH_ENDPOINT, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ transaction: signedTransaction }),
-    });
+    const res = await fetchWithRetry(
+      WEB_AUTH_ENDPOINT,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transaction: signedTransaction }),
+      },
+      { retries: 1, timeoutMs: FETCH_TIMEOUT_MS },
+    );
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new BadRequestException(body.error || 'the cash-out partner rejected that signature');
     return body;
@@ -52,6 +65,12 @@ export class WithdrawalsService {
   // SEP-24 step 1: opens an interactive session. The anchor hands back a
   // URL to its own hosted UI (bank details, test KYC) — Konfirm never sees
   // or stores any of that.
+  //
+  // Deliberately no retry here, unlike the reads above: this POST creates a
+  // new transaction on the anchor's side every time it succeeds. If the
+  // first attempt actually landed and only the response was lost in
+  // transit, blindly retrying would leave an orphaned duplicate transaction
+  // behind — a timeout still fails fast, it just doesn't self-heal.
   async startWithdrawal(token: string, currency: string, account: string) {
     const assetCode = currency === 'XLM' ? 'native' : currency;
     // The spec (SEP-24) allows form-encoded, multipart, or JSON bodies here
@@ -65,16 +84,21 @@ export class WithdrawalsService {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ asset_code: assetCode, account }),
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new BadRequestException(body.error || 'could not start a cash-out');
     return body;
   }
 
+  // A read, polled repeatedly anyway by the caller — safe to retry within a
+  // single poll rather than waiting a full extra interval on a blip.
   async getStatus(token: string, id: string): Promise<WithdrawTransaction> {
-    const res = await fetch(`${TRANSFER_SERVER}/transaction?id=${encodeURIComponent(id)}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
+    const res = await fetchWithRetry(
+      `${TRANSFER_SERVER}/transaction?id=${encodeURIComponent(id)}`,
+      { headers: { Authorization: `Bearer ${token}` } },
+      { timeoutMs: FETCH_TIMEOUT_MS },
+    );
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new BadRequestException(body.error || 'could not check cash-out status');
     return body.transaction;
@@ -89,7 +113,8 @@ export class WithdrawalsService {
       throw new BadRequestException('the cash-out partner has not confirmed transfer details yet');
     }
     const asset = resolveAsset(currency);
-    const sourceAccount = await this.horizon.loadAccount(account);
+    // A read, safe to retry — same reasoning as payments.service.ts.
+    const sourceAccount = await withRetry(() => this.horizon.loadAccount(account), { retries: 2, timeoutMs: 8_000 });
 
     let memo: Memo;
     if (txn.withdraw_memo_type === 'id') {

@@ -57,12 +57,44 @@ pub struct HorizonClient {
     http: reqwest::Client,
 }
 
+// reqwest::Client::new() has no timeout at all by default — a stalled
+// connection to Horizon would hang this call (and the whole reconciler
+// loop behind it) indefinitely rather than failing fast.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const MAX_ATTEMPTS: u32 = 3;
+
 impl HorizonClient {
     pub fn new(base_url: &str) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .timeout(REQUEST_TIMEOUT)
+                .build()
+                .expect("failed to build Horizon HTTP client"),
         }
+    }
+
+    // Retries a transient failure (timeout, connection reset, a 5xx from
+    // Horizon) with backoff; a genuine 4xx means the request itself is
+    // wrong and retrying it three times wouldn't change that, so those
+    // still surface immediately via the caller's own `error_for_status()`.
+    async fn get_with_retry(&self, url: &str) -> Result<reqwest::Response> {
+        let mut last_err = None;
+        for attempt in 0..MAX_ATTEMPTS {
+            match self.http.get(url).header("Accept", "application/json").send().await {
+                Ok(resp) if resp.status().is_server_error() => {
+                    last_err = Some(anyhow::anyhow!("Horizon returned {}", resp.status()));
+                }
+                Ok(resp) => return Ok(resp),
+                Err(e) => last_err = Some(e.into()),
+            }
+            if attempt + 1 < MAX_ATTEMPTS {
+                let backoff = std::time::Duration::from_millis(300 * 2u64.pow(attempt));
+                tracing::warn!(attempt, url, "Horizon request failed, retrying after backoff");
+                tokio::time::sleep(backoff).await;
+            }
+        }
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("Horizon request failed with no captured error")))
     }
 
     pub async fn payments_since(&self, account: &str, cursor: &str, limit: u32) -> Result<Vec<PaymentOp>> {
@@ -71,10 +103,7 @@ impl HorizonClient {
             self.base_url, account, cursor, limit
         );
         let resp = self
-            .http
-            .get(&url)
-            .header("Accept", "application/json")
-            .send()
+            .get_with_retry(&url)
             .await
             .context("horizon request failed")?
             .error_for_status()
@@ -95,10 +124,7 @@ impl HorizonClient {
             self.base_url, account
         );
         let resp = self
-            .http
-            .get(&url)
-            .header("Accept", "application/json")
-            .send()
+            .get_with_retry(&url)
             .await
             .context("horizon request failed while resolving now-cursor")?
             .error_for_status()

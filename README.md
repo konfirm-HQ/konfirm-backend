@@ -224,6 +224,29 @@ those are slower and more expensive to abuse than a plain DB read. Status-pollin
 every 3 seconds for the duration of a cash-out or deposit, which would otherwise sit right at a tighter
 limit's boundary.
 
+## Timeouts & retries
+
+Every external call (Horizon, the `stellar` CLI compliance check, the anchor) has a real timeout —
+none of them could hang a request indefinitely before this. Retries are deliberately asymmetric, not
+uniform, based on what's actually safe to repeat:
+
+| Call | Retry? | Why |
+|---|---|---|
+| `horizon.loadAccount` (reads) | Yes, 2x | A read has no side effect if repeated |
+| Anchor `GET` calls (challenge, status) | Yes | Same — idempotent reads |
+| Anchor `POST /auth` (token exchange) | Once | Re-submitting the same signed challenge is safe |
+| Anchor `POST .../interactive` (start withdraw/deposit) | No | Creates a new transaction on the anchor's side every success — a lost response retried blindly risks an orphaned duplicate, not a fixed request |
+| Compliance CLI shell-out | Once | Already fails open on any failure; one retry catches a single blip before falling through |
+
+`fetchWithRetry` (`src/common/retry.ts`) only retries a transport-level failure or a 5xx — a 4xx means
+the same thing on every attempt, so it's returned immediately rather than wasting three attempts on a
+request that was never going to succeed. Covered by unit tests, including the specific case of *not*
+retrying a 400.
+
+The Rust reconciler's `reqwest::Client` had no timeout at all by default; it now has one, plus its own
+retry-with-backoff on Horizon polling, on top of the existing shell-level `while true` restart loop
+documented above.
+
 ## Known limitations
 
 - **Testnet only.** Mainnet needs a funded production USDC issuer, `JWT_SECRET` in a real secrets manager, and HTTPS in front of the session cookie.
