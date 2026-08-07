@@ -1,9 +1,14 @@
 import { Body, Controller, Get, HttpCode, Post, Req, Res, UseGuards } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import type { Response } from 'express';
 import { z } from 'zod';
 import { ZodValidationPipe } from '../zod-validation.pipe';
 import { AuthService } from './auth.service';
 import { AuthedRequest, AuthGuard, SESSION_COOKIE } from './auth.guard';
+
+// Password-guessing and account-creation-spam both live here — 10/min per
+// IP is generous for a real user, punishing for a script.
+const AUTH_THROTTLE = { default: { limit: 10, ttl: 60_000 } };
 
 const signupSchema = z.object({
   email: z.string().email(),
@@ -28,6 +33,7 @@ export class AuthController {
   constructor(private readonly auth: AuthService) {}
 
   @Post('signup')
+  @Throttle(AUTH_THROTTLE)
   async signup(
     @Body(new ZodValidationPipe(signupSchema)) body: z.infer<typeof signupSchema>,
     @Res({ passthrough: true }) res: Response,
@@ -39,6 +45,7 @@ export class AuthController {
 
   @Post('login')
   @HttpCode(200)
+  @Throttle(AUTH_THROTTLE)
   async login(
     @Body(new ZodValidationPipe(loginSchema)) body: z.infer<typeof loginSchema>,
     @Res({ passthrough: true }) res: Response,

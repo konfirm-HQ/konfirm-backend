@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Get test USDC — Konfirm</title>
+<style>
+  :root {
+    --ink: #0a0908; --surface: #17140f; --surface-2: #1e1a14;
+    --border: #2b251c; --text-hi: #f5f3ee; --text-lo: #b6ada0; --text-faint: #8f8878;
+    --accent: #c3a06a; --accent-ink: #1a1408; --success: #3a9c7d; --error: #d9704a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: var(--ink); color: var(--text-hi);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    padding: 24px;
+  }
+  .card {
+    width: 100%; max-width: 440px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 16px;
+    padding: 32px; box-shadow: 0 24px 60px rgba(0,0,0,0.45);
+  }
+  .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; margin-bottom: 24px; }
+  .brand .mark { width: 22px; height: 22px; border-radius: 6px; background: var(--accent); color: var(--accent-ink); display: flex; align-items: center; justify-content: center; font-size: 13px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { font-size: 14px; color: var(--text-lo); margin: 0 0 20px; }
+
+  .callout {
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px 14px; font-size: 13px; color: var(--text-lo); margin-bottom: 20px; line-height: 1.5;
+  }
+
+  label { display: block; font-size: 13px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 8px; }
+  .field { margin-bottom: 18px; }
+  input {
+    width: 100%; padding: 12px 14px; border-radius: 10px; border: 1px solid var(--border);
+    background: var(--surface-2); color: var(--text-hi); font-size: 14px; font-family: inherit;
+  }
+  input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .hint { font-size: 12px; color: var(--text-faint); margin-top: 6px; }
+
+  button.primary {
+    width: 100%; padding: 14px; border-radius: 999px; border: none; font-size: 15px; font-weight: 700;
+    background: var(--accent); color: var(--accent-ink); cursor: pointer;
+  }
+  button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.secondary { width: 100%; padding: 14px; border-radius: 999px; border: 1px solid var(--border); background: transparent; color: var(--text-hi); font-size: 15px; font-weight: 700; cursor: pointer; margin-top: 10px; }
+  .status { font-size: 14px; color: var(--text-lo); text-align: center; margin-top: 16px; min-height: 20px; }
+  .status.error { color: var(--error); }
+  .hidden { display: none; }
+
+  .progress { text-align: center; padding: 10px 0; }
+  .progress .spin {
+    width: 32px; height: 32px; border-radius: 50%; margin: 0 auto 18px;
+    border: 3px solid var(--border); border-top-color: var(--accent);
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .progress .spin { animation: none; } }
+  .progress .stage { font-size: 14.5px; color: var(--text-lo); }
+
+  .success-box { text-align: center; padding: 10px 0; }
+  .success-box .tick { width: 56px; height: 56px; border-radius: 50%; background: var(--success); color: var(--ink);
+    display: flex; align-items: center; justify-content: center; font-size: 28px; margin: 0 auto 18px; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="brand"><span class="mark">✓</span> Konfirm</div>
+    <h1>Get test USDC</h1>
+    <p class="sub">For exercising checkout with a real wallet — not part of the merchant product.</p>
+
+    <div class="callout" id="step1-callout">
+      This uses <strong>Freighter</strong> to receive test USDC from Stellar's reference anchor, then
+      sends it on to wherever you actually need it (e.g. a mobile wallet). Freighter just needs to be
+      installed and set to Testnet — it doesn't need to be the wallet you're testing checkout with.
+    </div>
+
+    <div id="step1-view">
+      <button type="button" class="primary" id="connect-btn">Connect Freighter &amp; get test USDC</button>
+      <div class="status" id="status1"></div>
+    </div>
+
+    <div id="progress-view" class="progress hidden">
+      <div class="spin"></div>
+      <div class="stage" id="progress-stage">Working on it…</div>
+    </div>
+
+    <div id="step2-view" class="hidden">
+      <p class="sub">Test USDC landed in your Freighter account. Now send some to the wallet you're actually testing with.</p>
+      <div class="field">
+        <label for="dest">Destination address</label>
+        <input id="dest" type="text" placeholder="G..." autocomplete="off" />
+        <div class="hint">Must already have a USDC trustline — Konfirm can't add one for an address it never signs with.</div>
+      </div>
+      <div class="field">
+        <label for="amount">Amount</label>
+        <input id="amount" type="text" inputmode="decimal" value="5" />
+      </div>
+      <button type="button" class="primary" id="send-btn">Send USDC</button>
+      <div class="status" id="status2"></div>
+    </div>
+
+    <div id="success-view" class="success-box hidden">
+      <div class="tick">✓</div>
+      <div style="font-weight:700; font-size:18px; margin-bottom:8px;">Sent</div>
+      <div style="color:var(--text-lo); font-size:14px; margin-bottom:18px;">Check the destination wallet — the balance should update shortly.</div>
+      <button type="button" class="secondary" id="another-btn">Send more</button>
+    </div>
+  </div>
+
+<script type="module">
+  import freighterApi from 'https://esm.sh/@stellar/freighter-api@4';
+
+  const API_BASE = window.location.origin;
+  const HORIZON_URL = "https://horizon-testnet.stellar.org";
+  const el = (id) => document.getElementById(id);
+  let freighterAddress;
+
+  function setStatus(id, msg, isError) {
+    const s = el(id);
+    s.textContent = msg || '';
+    s.className = 'status' + (isError ? ' error' : '');
+  }
+
+  function showView(id) {
+    ['step1-view', 'progress-view', 'step2-view', 'success-view'].forEach((v) => {
+      el(v).classList.toggle('hidden', v !== id);
+    });
+  }
+
+  function showProgress(stage) {
+    showView('progress-view');
+    el('progress-stage').textContent = stage;
+  }
+
+  function friendlyMessage(err) {
+    const msg = String(err?.message || err || '');
+    if (msg.toLowerCase().includes('trustline')) return msg;
+    if (msg.toLowerCase().includes('not found')) return msg;
+    if (msg.toLowerCase().includes('declined') || msg.toLowerCase().includes('rejected')) {
+      return "You'll need to approve the signature in your wallet to continue.";
+    }
+    if (msg.toLowerCase().includes('freighter') || msg.toLowerCase().includes('wallet')) {
+      return "We couldn't connect to your wallet. Make sure Freighter is installed and unlocked.";
+    }
+    return "Something didn't go through. Please try again.";
+  }
+
+  el('connect-btn').addEventListener('click', async () => {
+    el('connect-btn').disabled = true;
+    setStatus('status1', '');
+    try {
+      showProgress('Connecting your wallet…');
+      const access = await freighterApi.requestAccess();
+      if (access.error) throw new Error(access.error);
+      freighterAddress = access.address;
+
+      showProgress('Requesting a login challenge…');
+      const challengeRes = await fetch(`${API_BASE}/deposits/challenge?account=${encodeURIComponent(freighterAddress)}`);
+      const challenge = await challengeRes.json();
+      if (!challengeRes.ok) throw new Error(challenge.message || 'could not reach the test-funds partner');
+
+      showProgress('Approve the sign-in in your wallet…');
+      const signedChallenge = await freighterApi.signTransaction(challenge.transaction, {
+        networkPassphrase: challenge.network_passphrase,
+        address: freighterAddress,
+      });
+      if (signedChallenge.error) throw new Error(signedChallenge.error);
+
+      const tokenRes = await fetch(`${API_BASE}/deposits/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transaction: signedChallenge.signedTxXdr }),
+      });
+      const tokenBody = await tokenRes.json();
+      if (!tokenRes.ok) throw new Error(tokenBody.message || 'the test-funds partner rejected that signature');
+
+      showProgress('Opening the deposit form…');
+      const startRes = await fetch(`${API_BASE}/deposits/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ currency: 'USDC', token: tokenBody.token, account: freighterAddress }),
+      });
+      const startBody = await startRes.json();
+      if (!startRes.ok) throw new Error(startBody.message || 'could not start a deposit');
+
+      window.open(startBody.url, 'konfirm-deposit', 'width=460,height=700');
+
+      for (let i = 0; i < 150; i++) {
+        const statusRes = await fetch(`${API_BASE}/deposits/status?token=${encodeURIComponent(tokenBody.token)}&id=${encodeURIComponent(startBody.id)}`);
+        const txn = await statusRes.json();
+        if (txn.status === 'completed') {
+          showView('step2-view');
+          return;
+        }
+        if (['error', 'expired', 'refunded'].includes(txn.status)) {
+          throw new Error('the test-funds partner could not complete this one');
+        }
+        showProgress('Waiting for the deposit to land…');
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+      throw new Error('timed out waiting for the deposit');
+    } catch (err) {
+      console.error('[konfirm get-test-usdc]', err);
+      showView('step1-view');
+      setStatus('status1', friendlyMessage(err), true);
+    } finally {
+      el('connect-btn').disabled = false;
+    }
+  });
+
+  el('send-btn').addEventListener('click', async () => {
+    const dest = el('dest').value.trim();
+    const amount = el('amount').value.trim();
+    if (!/^G[A-Z2-7]{55}$/.test(dest)) {
+      setStatus('status2', 'Enter a valid Stellar G... address.', true);
+      return;
+    }
+    if (!amount || Number(amount) <= 0) {
+      setStatus('status2', 'Enter an amount greater than 0.', true);
+      return;
+    }
+
+    el('send-btn').disabled = true;
+    setStatus('status2', '');
+    try {
+      showProgress('Preparing the transfer…');
+      const prepRes = await fetch(`${API_BASE}/deposits/transfer-payment`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from: freighterAddress, to: dest, currency: 'USDC', amount }),
+      });
+      const prep = await prepRes.json();
+      if (!prepRes.ok) throw new Error(prep.message || 'could not prepare the transfer');
+
+      showProgress('Approve the transfer in your wallet…');
+      const signed = await freighterApi.signTransaction(prep.xdr, {
+        networkPassphrase: prep.network_passphrase,
+        address: freighterAddress,
+      });
+      if (signed.error) throw new Error(signed.error);
+
+      showProgress('Sending…');
+      const submitRes = await fetch(`${HORIZON_URL}/transactions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: `tx=${encodeURIComponent(signed.signedTxXdr)}`,
+      });
+      const submitResult = await submitRes.json();
+      if (!submitRes.ok) {
+        const codes = submitResult.extras?.result_codes;
+        throw new Error(codes ? JSON.stringify(codes) : submitResult.title || 'submission failed');
+      }
+
+      showView('success-view');
+    } catch (err) {
+      console.error('[konfirm get-test-usdc]', err);
+      showView('step2-view');
+      setStatus('status2', friendlyMessage(err), true);
+    } finally {
+      el('send-btn').disabled = false;
+    }
+  });
+
+  el('another-btn').addEventListener('click', () => {
+    showView('step2-view');
+    setStatus('status2', '');
+  });
+</script>
+</body>
+</html>

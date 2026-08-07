@@ -1,11 +1,16 @@
 import { BadRequestException, Controller, Get, Param, Query } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { PaymentsService } from './payments.service';
 
 @Controller('payments')
 export class PaymentsController {
   constructor(private readonly payments: PaymentsService) {}
 
+  // Shells out to the `stellar` CLI (compliance check) and calls Horizon —
+  // both real external processes/services, not a cheap DB read. 20/min per
+  // IP is far more than a real checkout attempt ever needs.
   @Get('prepare-tx')
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
   prepareTx(
     @Query('linkId') linkId: string,
     @Query('muxed_id') muxedId: string,

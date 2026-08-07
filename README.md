@@ -145,6 +145,57 @@ public/         frontend pages (mirrored in konfirm-frontend)
 scripts/testnet-harness/  standalone Node scripts for exercising payments outside the browser
 ```
 
+## Testing
+
+```bash
+createdb konfirm_test
+for f in db/migrations/*.sql; do psql konfirm_test -f "$f"; done
+npm test
+```
+
+Real Postgres, real bcrypt hashing, real Horizon calls — no mocks standing in for the things that
+actually need to be correct. Three layers:
+
+- **Unit** (`src/common/asset.spec.ts`) — pure logic, no I/O.
+- **Integration** (`src/auth/auth.service.spec.ts`) — hits the real `konfirm_test` database (set via
+  `test/env.ts`, never `konfirm_dev`) for signup/login/duplicate-email/no-account-enumeration checks.
+- **Critical-path E2E** (`test/critical-path.e2e-spec.ts`) — boots the actual Nest app and drives it
+  through signup → create link (verifying a client-supplied `merchant_id` is ignored) → reserve a
+  session → prepare a transaction, then **decodes the returned XDR for real** and asserts on its
+  destination, operation, and memo — exactly the kind of check that would have caught the
+  muxed-address-vs-memo routing bug earlier in this project's life automatically, rather than needing
+  a human to notice a wallet crash days later.
+
+What this suite deliberately does **not** cover: actually signing and submitting a transaction (needs
+a real wallet holding a private key — a browser-and-a-human problem, not a CI problem) and the
+SEP-10/24 anchor's interactive popup (same reason). Those stay manually tested.
+
+## Backups
+
+```bash
+db/scripts/backup.sh konfirm_dev              # dumps to db/backups/, prunes to the last 14
+db/scripts/restore.sh <dump_file> <target_db>  # restores; refuses to clobber a non-empty DB without FORCE=1
+```
+
+A daily backup runs via cron (`crontab -l` to see it) at 03:00. Both scripts have been run for real —
+restoring into a scratch database and diffing every table's row count against the original, not just
+checking that `pg_dump` exited zero.
+
+**This is not a real backup strategy yet** — it's a local file on the same disk as the database it's
+backing up. A drive failure takes out both. Before this matters for real: ship dumps to a second
+location (S3, another machine) as part of the same script.
+
+## Rate limiting
+
+`@nestjs/throttler`, global default of 60 req/min per IP per route. Tighter limits where it actually
+matters: `/auth/login` and `/auth/signup` at 10/min (brute-force/signup-spam resistance), and anything
+that calls an external service — `/payments/prepare-tx` (shells out to the `stellar` CLI *and* calls
+Horizon), the whole `/withdrawals` and `/deposits` controllers (call the anchor) — at 20/min, since
+those are slower and more expensive to abuse than a plain DB read. Status-polling endpoints
+(`/withdrawals/status`, `/deposits/status`) get their own 60/min headroom since the frontend polls them
+every 3 seconds for the duration of a cash-out or deposit, which would otherwise sit right at a tighter
+limit's boundary.
+
 ## Known limitations
 
 - **Testnet only.** Mainnet needs a funded production USDC issuer, `JWT_SECRET` in a real secrets manager, and HTTPS in front of the session cookie.

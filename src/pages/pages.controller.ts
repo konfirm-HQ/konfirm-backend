@@ -48,4 +48,9 @@ export class PagesController {
   cashout(@Res() res: Response) {
     this.serve(res, 'cashout.html');
   }
+
+  @Get('get-test-usdc')
+  getTestUsdc(@Res() res: Response) {
+    this.serve(res, 'get-test-usdc.html');
+  }
 }

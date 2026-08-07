@@ -4,3 +4,5 @@ dist/
 *.log
 reconciler/target/
 *.sqlite
+db/backups/
+coverage/
