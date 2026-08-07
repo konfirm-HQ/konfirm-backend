@@ -267,6 +267,14 @@ The Rust reconciler's `reqwest::Client` had no timeout at all by default; it now
 retry-with-backoff on Horizon polling, on top of the existing shell-level `while true` restart loop
 documented above.
 
+## Incidents
+
+[`docs/RUNBOOK.md`](docs/RUNBOOK.md) — four incidents in order of likelihood, three of which already
+happened during development (Horizon/Soroban RPC outages, a compliance-check failure from the same
+outage) plus the one most specific to this architecture (the reconciler falling behind, which makes
+real on-chain payments invisible until it catches up). Written from having actually diagnosed each
+one, not a generic template.
+
 ## Known limitations
 
 - **Testnet only.** Mainnet needs a funded production USDC issuer, `JWT_SECRET` in a real secrets manager, and HTTPS in front of the session cookie.
