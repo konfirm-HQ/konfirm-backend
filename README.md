@@ -50,11 +50,11 @@ node -e "console.log(require('crypto').randomBytes(48).toString('base64'))"
 | `SENTRY_DSN` | No | Enables error tracking (see Logging & error tracking below); a no-op without it |
 | `NODE_ENV` | No | Set to `production` for real JSON log lines instead of the pretty dev formatter |
 
-Create the database and apply migrations, in order:
+Create the database and apply migrations:
 
 ```bash
 createdb konfirm_dev
-for f in db/migrations/*.sql; do psql konfirm_dev -f "$f"; done
+npm run migrate:up
 ```
 
 Run the API:
@@ -142,7 +142,8 @@ src/
   common/       shared asset resolution (XLM/USDC)
   db/           Postgres pool
 reconciler/     Rust binary — watches Horizon, writes confirmed payments
-db/migrations/  ordered SQL, no migration framework
+db/migrations/  ordered .up.sql/.down.sql pairs, applied by db/migrate.ts
+db/migrate.ts   the migration runner itself — no framework, tracks applied migrations in Postgres
 public/         frontend pages (mirrored in konfirm-frontend)
 scripts/testnet-harness/  standalone Node scripts for exercising payments outside the browser
 ```
@@ -177,7 +178,7 @@ warning and is a documented no-op, not a silent gap.
 
 ```bash
 createdb konfirm_test
-for f in db/migrations/*.sql; do psql konfirm_test -f "$f"; done
+DATABASE_URL=postgres:///konfirm_test npm run migrate:up
 npm test
 ```
 
@@ -197,6 +198,25 @@ actually need to be correct. Three layers:
 What this suite deliberately does **not** cover: actually signing and submitting a transaction (needs
 a real wallet holding a private key — a browser-and-a-human problem, not a CI problem) and the
 SEP-10/24 anchor's interactive popup (same reason). Those stay manually tested.
+
+## Migrations
+
+```bash
+npm run migrate:up            # applies every pending .up.sql, in order
+npm run migrate:down          # reverts the most recently applied migration
+npm run migrate:down -- 3     # reverts the last 3
+```
+
+Each migration is a `NNN_name.up.sql` / `NNN_name.down.sql` pair — `db/migrate.ts` tracks what's been
+applied in a `schema_migrations` table, so `up` only ever runs what's actually pending (safe to run
+repeatedly) and `down` can genuinely undo something, not just re-run `CREATE TABLE IF NOT EXISTS` and
+hope. The migration's SQL and its tracking-table record land in the same transaction, so a failure
+can't leave the two out of sync.
+
+Verified for real: applied all 5 from empty, reverted one at a time down to nothing (confirming each
+table — and the `claim_link_seq` function — actually disappeared), then reapplied cleanly. This isn't
+theoretical; every step above was run against a live scratch database, not inferred from reading the
+script.
 
 ## Backups
 

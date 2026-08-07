@@ -5,7 +5,9 @@
   "scripts": {
     "start": "ts-node -r tsconfig-paths/register src/main.ts",
     "build": "tsc -p tsconfig.json",
-    "test": "jest"
+    "test": "jest",
+    "migrate:up": "ts-node -r tsconfig-paths/register db/migrate.ts up",
+    "migrate:down": "ts-node -r tsconfig-paths/register db/migrate.ts down"
   },
   "dependencies": {
     "@nestjs/common": "^11.1.28",

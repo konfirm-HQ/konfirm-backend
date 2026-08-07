@@ -44,10 +44,7 @@ jobs:
         run: npm ci
 
       - name: Apply migrations to the test database
-        run: |
-          for f in db/migrations/*.sql; do
-            PGPASSWORD=postgres psql -h localhost -U postgres -d konfirm_test -f "$f"
-          done
+        run: npm run migrate:up
 
       - name: Type check
         run: npx tsc --noEmit -p .

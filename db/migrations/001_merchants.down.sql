@@ -1,0 +1,2 @@
+DROP FUNCTION IF EXISTS claim_link_seq(UUID);
+DROP TABLE IF EXISTS merchants;
