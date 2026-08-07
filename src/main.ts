@@ -1,9 +1,7 @@
 import 'dotenv/config';
 import 'reflect-metadata';
-import { join } from 'node:path';
 import { NestFactory } from '@nestjs/core';
 import cookieParser from 'cookie-parser';
-import express from 'express';
 import { Logger } from 'nestjs-pino';
 import { AppModule } from './app.module';
 import { initSentry } from './observability/sentry';
@@ -16,9 +14,6 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule, { bufferLogs: true });
   app.useLogger(app.get(Logger));
   app.use(cookieParser());
-  // Vendored, not CDN-loaded — the QR encoder needs to be servable without
-  // depending on a third-party host being up or matching a guessed shape.
-  app.use('/vendor', express.static(join(__dirname, '..', 'public', 'vendor')));
   // Express auto-generates ETags for every response by default, which lets
   // a browser skip re-fetching via a conditional request — a second,
   // independent caching path beyond Cache-Control that would reproduce the

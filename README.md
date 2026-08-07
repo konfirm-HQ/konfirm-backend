@@ -1,8 +1,8 @@
 # konfirm-backend
 
-The API and settlement-watching service behind **Konfirm**, a non-custodial payment processor built on Stellar. This repo is the NestJS API, the Postgres schema, and a Rust reconciler that watches the chain and turns confirmed transactions into records — nothing here ever holds a merchant's or payer's private key.
+The API and settlement-watching service behind **Konfirm**, a non-custodial payment processor built on Stellar. This repo is a pure JSON API: the NestJS app, the Postgres schema, and a Rust reconciler that watches the chain and turns confirmed transactions into records — nothing here ever holds a merchant's or payer's private key, and nothing here serves a page.
 
-Sibling repos: [konfirm-contracts](https://github.com/samuel2926i39-art/konfirm-contracts) (Soroban contracts, not yet wired into this API's runtime path) and [konfirm-frontend](https://github.com/samuel2926i39-art/konfirm-frontend) (the pages this service currently serves as a same-origin copy).
+Sibling repos: [konfirm-contracts](https://github.com/samuel2926i39-art/konfirm-contracts) (Soroban contracts, not yet wired into this API's runtime path) and [konfirm-frontend](https://github.com/samuel2926i39-art/konfirm-frontend) (the Next.js app that calls this API — the only place the frontend lives; it proxies to whatever `BACKEND_URL` points at rather than being served from here).
 
 ## How it works
 
@@ -21,7 +21,6 @@ Cashing out to a bank account is a real SEP-10 (auth) + SEP-24 (interactive with
 - **Zod** for request validation at every controller boundary
 - **`@stellar/stellar-sdk`** for building/reading transactions server-side
 - **Rust reconciler** (`reconciler/`), a separate binary using `sqlx` against the same Postgres database
-- Static frontend pages served directly from `public/` via `readFileSync` (no templating engine, no bundler)
 
 ## Prerequisites
 
@@ -121,10 +120,6 @@ All endpoints are JSON unless noted. Routes marked 🔒 require a valid `konfirm
 | `GET` | `/withdrawals/status` 🔒 | `token, id` | Polls the anchor's transaction status |
 | `POST` | `/withdrawals/prepare-payment` 🔒 | `currency, token, id` | Once the anchor is ready (`pending_user_transfer_start`), builds the on-chain payment to the anchor's account for the merchant to sign |
 
-### Pages
-
-`GET /login`, `/signup`, `/new`, `/pay/:linkId`, `/activity`, `/cashout` — static HTML served fresh from disk on every request (`Cache-Control: no-store`, ETags disabled), so edits under `public/` take effect on the next request without a server restart.
-
 ## Auth
 
 Sessions are an httpOnly JWT cookie (`konfirm_session`, 30-day expiry, `SameSite=Lax`). Passwords are bcrypt-hashed. `AuthGuard` attaches `req.merchant` (id, email, name, `stellar_base_address`) to any route behind it — controllers derive identity from this, never from a client-supplied field.
@@ -138,13 +133,11 @@ src/
   sessions/     muxed-ID reservation against a link
   payments/     prepare-tx (Freighter), pay-uri (SEP-7), compliance check, by-merchant queries
   withdrawals/  SEP-10/SEP-24 fiat off-ramp
-  pages/        serves the static frontend
   common/       shared asset resolution (XLM/USDC)
   db/           Postgres pool
 reconciler/     Rust binary — watches Horizon, writes confirmed payments
 db/migrations/  ordered .up.sql/.down.sql pairs, applied by db/migrate.ts
 db/migrate.ts   the migration runner itself — no framework, tracks applied migrations in Postgres
-public/         frontend pages (mirrored in konfirm-frontend)
 scripts/testnet-harness/  standalone Node scripts for exercising payments outside the browser
 ```
 
