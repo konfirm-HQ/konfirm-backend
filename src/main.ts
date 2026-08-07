@@ -4,10 +4,17 @@ import { join } from 'node:path';
 import { NestFactory } from '@nestjs/core';
 import cookieParser from 'cookie-parser';
 import express from 'express';
+import { Logger } from 'nestjs-pino';
 import { AppModule } from './app.module';
+import { initSentry } from './observability/sentry';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  initSentry();
+  // bufferLogs holds anything logged before the pino logger takes over
+  // (below) and replays it through pino instead of dropping it or falling
+  // back to Nest's plain console logger for just those first few lines.
+  const app = await NestFactory.create(AppModule, { bufferLogs: true });
+  app.useLogger(app.get(Logger));
   app.use(cookieParser());
   // Vendored, not CDN-loaded — the QR encoder needs to be servable without
   // depending on a third-party host being up or matching a guessed shape.

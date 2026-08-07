@@ -47,6 +47,8 @@ node -e "console.log(require('crypto').randomBytes(48).toString('base64'))"
 | `DATABASE_URL` | Yes | e.g. `postgres://you@localhost:5432/konfirm_dev` |
 | `JWT_SECRET` | Recommended | Falls back to an insecure dev default with a console warning if unset — fine for localhost, never beyond it |
 | `PORT` | No | Defaults to `3001` |
+| `SENTRY_DSN` | No | Enables error tracking (see Logging & error tracking below); a no-op without it |
+| `NODE_ENV` | No | Set to `production` for real JSON log lines instead of the pretty dev formatter |
 
 Create the database and apply migrations, in order:
 
@@ -144,6 +146,32 @@ db/migrations/  ordered SQL, no migration framework
 public/         frontend pages (mirrored in konfirm-frontend)
 scripts/testnet-harness/  standalone Node scripts for exercising payments outside the browser
 ```
+
+## Logging & error tracking
+
+Structured JSON logs via `nestjs-pino` (pretty-printed in dev, real newline-delimited JSON in
+production) — every request gets an id, correlating its log lines. Two things worth knowing:
+
+- **Cookies and auth headers are redacted at the logger level** (`req.headers.cookie`,
+  `req.headers.authorization`, `res.headers["set-cookie"]`) — verified by inspecting real log output,
+  not just trusting the config. Structured logging that leaked the session JWT would be a net loss.
+- **High-frequency polling routes are excluded from request/response logging**
+  (`/payments/by-merchant`, `/payments/pending-by-merchant`, `/withdrawals/status`,
+  `/deposits/status`) — the activity/checkout/cash-out pages hit these every 2–3 seconds while open,
+  and logging every poll would drown out everything else within minutes.
+
+A global exception filter (`src/observability/all-exceptions.filter.ts`) passes through every
+`HttpException` unchanged (a 401 or a 409 is expected application flow, not an incident) and logs
+anything else — a genuinely unexpected failure — with full detail (stack trace, the real upstream
+error body) while the client only ever sees a generic `{"statusCode":500,"message":"internal server
+error"}`. Verified for real by forcing an actual unhandled Horizon SDK error and confirming both the
+rich server-side log and the safe client response.
+
+Error tracking is `@sentry/node`, entirely opt-in via `SENTRY_DSN` — this pilot has never had a Sentry
+project, so unlike everything else in this README, that half can't be proven against a real dashboard.
+What's real: the integration itself, and that it's already wired into the exception filter above, so
+setting one env var in production turns it on with no code change. Without a DSN it logs a startup
+warning and is a documented no-op, not a silent gap.
 
 ## Testing
 
