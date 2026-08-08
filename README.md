@@ -129,6 +129,7 @@ Routes marked 🔐 require a valid `konfirm_admin_session` cookie — a complete
 | `POST` | `/admin/auth/login` | `email, password` | Same no-enumeration error as merchant login |
 | `POST` | `/admin/auth/logout` | — | Clears the admin session cookie |
 | `GET` | `/admin/auth/me` 🔐 | — | Current admin's claims |
+| `GET` | `/admin/stats` 🔐 | — | Real Postgres aggregates for the Overview dashboard: merchant counts by status, today's payment count/volume, a zero-filled 7-day daily volume series — nothing fabricated for the sake of a fuller-looking chart |
 | `GET` | `/admin/merchants` 🔐 | — | All merchants, newest first (`?limit`, `?offset`) |
 | `PATCH` | `/admin/merchants/:id/status` 🔐 | `status: 'active'\|'suspended', reason?` | Takes effect immediately — see below, this isn't just a future-login gate |
 | `GET` | `/admin/activity` 🔐 | — | Recent admin actions, newest first (`?limit`) — every mutation above logs here |

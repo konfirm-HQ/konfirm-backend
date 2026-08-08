@@ -71,6 +71,16 @@ describe('admin workflow: suspend/reactivate a merchant (e2e)', () => {
     linkId = linkRes.body.id;
   });
 
+  it('returns real aggregate stats, not fabricated ones', async () => {
+    const res = await request(app.getHttpServer()).get('/admin/stats').set('Cookie', adminCookie).expect(200);
+    expect(res.body.merchants.total).toBeGreaterThanOrEqual(1);
+    expect(res.body.merchants.active + res.body.merchants.suspended + res.body.merchants.pending).toBe(res.body.merchants.total);
+    // Always exactly 7 entries, zero-filled for days with no payments —
+    // never a partial or ragged series for the chart to choke on.
+    expect(res.body.daily_volume).toHaveLength(7);
+    expect(res.body.daily_volume[6].date).toBe(new Date().toISOString().slice(0, 10));
+  });
+
   it('lists the merchant via the admin API', async () => {
     const res = await request(app.getHttpServer()).get('/admin/merchants').set('Cookie', adminCookie).expect(200);
     expect(res.body.some((m: { email: string }) => m.email === merchantEmail)).toBe(true);

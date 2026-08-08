@@ -4,6 +4,7 @@ import { ZodValidationPipe } from '../zod-validation.pipe';
 import { AdminGuard, AuthedAdminRequest } from '../admin-auth/admin-auth.guard';
 import { AdminMerchantsService } from './admin-merchants.service';
 import { AdminActionsService } from './admin-actions.service';
+import { AdminStatsService } from './admin-stats.service';
 
 const setStatusSchema = z.object({
   status: z.enum(['active', 'suspended']),
@@ -21,7 +22,13 @@ export class AdminController {
   constructor(
     private readonly merchants: AdminMerchantsService,
     private readonly actions: AdminActionsService,
+    private readonly stats: AdminStatsService,
   ) {}
+
+  @Get('stats')
+  getStats() {
+    return this.stats.get();
+  }
 
   @Get('merchants')
   listMerchants(@Query('limit') limit?: string, @Query('offset') offset?: string) {
