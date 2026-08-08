@@ -21,6 +21,17 @@ const COMPLIANCE_CONTRACT_ID = 'CDDVLE2DZQAYFY3Z2Z74TUNNPC4ROUACSBXOB2P64IT75EZF
 export class PaymentsService {
   private horizon = new Horizon.Server(HORIZON_URL);
 
+  // A local admin-managed block takes precedence and is checked first —
+  // instant, no subprocess, fails closed (unlike the chain check below,
+  // which fails open). Only covers this path: buildPayUri() (SEP-7/QR) has
+  // no payer address at request time and remains unscreened either way —
+  // an inherited gap, not something this check silently fixes or worsens.
+  private async isPayerAllowed(address: string): Promise<boolean> {
+    const { rows } = await pool.query('SELECT 1 FROM blocked_addresses WHERE stellar_address = $1', [address]);
+    if (rows.length > 0) return false;
+    return this.isAllowedOnChain(address);
+  }
+
   // Calling the deployed contract via the `stellar` CLI rather than
   // hand-rolling a Soroban RPC client call — for a pilot this is a
   // reasonable, low-risk choice; swapping to a direct rpc.Server call is a
@@ -87,7 +98,7 @@ export class PaymentsService {
 
     // Compliance screening happens before any XDR is built — a blocked
     // address must never receive a transaction to sign.
-    const allowed = await this.isAllowedOnChain(payerAddress);
+    const allowed = await this.isPayerAllowed(payerAddress);
     if (!allowed) {
       throw new ForbiddenException('this address is not permitted to pay');
     }

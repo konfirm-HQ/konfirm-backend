@@ -3,6 +3,7 @@ import { Throttle } from '@nestjs/throttler';
 import { z } from 'zod';
 import { ZodValidationPipe } from '../zod-validation.pipe';
 import { AuthedRequest, AuthGuard } from '../auth/auth.guard';
+import { pool } from '../db/pool';
 import { WithdrawalsService } from './withdrawals.service';
 
 const tokenSchema = z.object({ transaction: z.string().min(1) });
@@ -40,8 +41,21 @@ export class WithdrawalsController {
   }
 
   @Post('start')
-  start(@Body(new ZodValidationPipe(startSchema)) body: z.infer<typeof startSchema>, @Req() req: AuthedRequest) {
-    return this.withdrawals.startWithdrawal(body.token, body.currency, req.merchant.stellar_base_address!);
+  async start(@Body(new ZodValidationPipe(startSchema)) body: z.infer<typeof startSchema>, @Req() req: AuthedRequest) {
+    const result = await this.withdrawals.startWithdrawal(body.token, body.currency, req.merchant.stellar_base_address!);
+    // Best-effort — this is purely an admin-visibility record, and a
+    // tracking-insert failure must never block the merchant's actual
+    // cash-out, which has already succeeded on the anchor's side by now.
+    try {
+      await pool.query(
+        `INSERT INTO withdrawal_attempts (merchant_id, currency, anchor_tx_id, token) VALUES ($1, $2, $3, $4)`,
+        [req.merchant.id, body.currency, result.id, body.token],
+      );
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn('[withdrawals] could not record admin-visibility tracking row', err);
+    }
+    return result;
   }
 
   // Polled every 3s for the duration of an in-progress cash-out (which can

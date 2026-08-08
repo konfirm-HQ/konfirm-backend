@@ -1,12 +1,17 @@
 import { Injectable } from '@nestjs/common';
 import { pool } from '../db/pool';
 
+const TERMINAL_WITHDRAWAL_STATUSES = ['completed', 'error', 'expired', 'refunded'];
+
 export interface AdminStats {
   merchants: { total: number; active: number; suspended: number; pending: number };
   payments: { today_count: number; today_net_usdc: string; last_7d_net_usdc: string };
   // Newest-last, one entry per day, always 7 entries — zero-filled for days
   // with no payments so the chart never has to guess about a gap.
   daily_volume: { date: string; net_usdc: string }[];
+  compliance: { blocked_count: number };
+  reconciler: { cursor: string | null; updated_at: string | null };
+  withdrawals: { open_count: number };
 }
 
 // Every number here is a real Postgres aggregate — nothing fabricated for
@@ -15,7 +20,7 @@ export interface AdminStats {
 @Injectable()
 export class AdminStatsService {
   async get(): Promise<AdminStats> {
-    const [merchantCounts, todayPayments, weekPayments, dailySeries] = await Promise.all([
+    const [merchantCounts, todayPayments, weekPayments, dailySeries, blockedCount, reconcilerState, openWithdrawals] = await Promise.all([
       pool.query(`SELECT status, COUNT(*)::int AS count FROM merchants GROUP BY status`),
       pool.query(
         `SELECT COUNT(*)::int AS count, COALESCE(SUM(net_usdc), 0) AS net_usdc
@@ -28,6 +33,11 @@ export class AdminStatsService {
          WHERE created_at >= NOW() - INTERVAL '7 days'
          GROUP BY day`,
       ),
+      pool.query(`SELECT COUNT(*)::int AS count FROM blocked_addresses`),
+      pool.query(`SELECT value, updated_at FROM reconciler_state WHERE key = 'cursor'`),
+      pool.query(`SELECT COUNT(*)::int AS count FROM withdrawal_attempts WHERE last_status IS NULL OR last_status != ALL($1)`, [
+        TERMINAL_WITHDRAWAL_STATUSES,
+      ]),
     ]);
 
     const byStatus: Record<string, number> = {};
@@ -59,6 +69,12 @@ export class AdminStatsService {
         last_7d_net_usdc: weekPayments.rows[0].net_usdc,
       },
       daily_volume,
+      compliance: { blocked_count: blockedCount.rows[0].count },
+      reconciler: {
+        cursor: reconcilerState.rows[0]?.value ?? null,
+        updated_at: reconcilerState.rows[0]?.updated_at ?? null,
+      },
+      withdrawals: { open_count: openWithdrawals.rows[0].count },
     };
   }
 }

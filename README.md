@@ -132,9 +132,23 @@ Routes marked 🔐 require a valid `konfirm_admin_session` cookie — a complete
 | `GET` | `/admin/stats` 🔐 | — | Real Postgres aggregates for the Overview dashboard: merchant counts by status, today's payment count/volume, a zero-filled 7-day daily volume series — nothing fabricated for the sake of a fuller-looking chart |
 | `GET` | `/admin/merchants` 🔐 | — | All merchants, newest first (`?limit`, `?offset`) |
 | `PATCH` | `/admin/merchants/:id/status` 🔐 | `status: 'active'\|'suspended', reason?` | Takes effect immediately — see below, this isn't just a future-login gate |
+| `GET` | `/admin/payments` 🔐 | — | All payments across every merchant, newest first (`?status`, `?limit`, `?offset`) |
+| `PATCH` | `/admin/payments/:id/status` 🔐 | `status: 'paid'\|'held'\|'disputed', reason?` | Reuses the `payments.status` CHECK constraint that's existed since the original schema but was never written to anything but `'paid'` until now |
+| `GET` | `/admin/compliance/blocked-addresses` 🔐 | — | The admin-managed address blocklist |
+| `POST` | `/admin/compliance/blocked-addresses` 🔐 | `stellar_address, reason?` | 409 on a duplicate, not a silent no-op |
+| `DELETE` | `/admin/compliance/blocked-addresses/:id` 🔐 | — | Unblocks |
+| `GET` | `/admin/reconciler/status` 🔐 | — | The reconciler's current Horizon cursor + when it last moved |
+| `POST` | `/admin/reconciler/rewind` 🔐 | `cursor` | **Backward-only** — see below |
+| `GET` | `/admin/withdrawal-attempts` 🔐 | — | Merchant cash-outs Konfirm has observed being started, with the anchor's last known status |
 | `GET` | `/admin/activity` 🔐 | — | Recent admin actions, newest first (`?limit`) — every mutation above logs here |
 
-This is Slice 1 of the admin workflow: identity plus merchant management. Payment review, an address-level compliance blocklist, reconciler status/control, and withdrawal-attempt tracking are a deliberately deferred second slice — see [Known limitations](#known-limitations).
+This was originally split into two delivery slices — identity plus merchant management shipped first, alone, before the rest — deliberately, so the newest and highest-privilege part of the system (a second, separate login) got proven in real use before more was built on top of it. Both slices are now built.
+
+**The compliance blocklist only covers the Freighter path** (`POST /payments/prepare-tx`). The SEP-7/QR checkout path (`GET /payments/pay-uri`) still has no payer address at request time to check against anything — the same limitation the on-chain compliance contract already has, not something this blocklist changes either way.
+
+**The reconciler rewind endpoint enforces backward-only**, in code, for the first time — previously this was only ever the reconciler CLI's `set-cursor` command plus a warning in `docs/RUNBOOK.md` §4 ("never manually set-cursor forward past unprocessed payments — that permanently skips real transactions"). The stored cursor is either the literal string `'now'` or a numeric Horizon paging token; moving off `'now'` to any real position is always allowed, but moving back *to* `'now'`, or to any numeric value ahead of the current one, is rejected with a 400. This does **not** add process coordination — if the Rust reconciler is actively running when an admin rewinds, the same race that already existed with the CLI tool still exists; this endpoint adds a correctness guard, not a lock.
+
+**Withdrawal-attempt tracking is admin-visibility only, not control.** Withdrawals are a live proxy to Stellar's reference anchor with no local state of their own — `withdrawal_attempts` is a thin record written when a merchant starts a cash-out (`withdrawals.controller.ts`'s `start()`, best-effort — a tracking-insert failure never blocks the real cash-out, which has already succeeded on the anchor's side by then) and refreshed by re-polling the anchor with the stored session token whenever an admin loads the list. The anchor's own JWTs are short-lived (~24h on `testanchor.stellar.org`); once one expires, that row simply stops updating rather than erroring loudly. Konfirm has no authority to change the anchor's transaction state, so there is no admin "resolve this" action here — only visibility into what the anchor is reporting. The raw token itself is never returned to the admin UI — it's a bearer credential, not a display field.
 
 ## Auth
 
@@ -164,7 +178,7 @@ src/
   payments/     prepare-tx (Freighter), pay-uri (SEP-7), compliance check, by-merchant queries
   withdrawals/  SEP-10/SEP-24 fiat off-ramp
   admin-auth/   separate admin identity — guard, JWT service, login/logout/me controller
-  admin/        admin resource endpoints (merchants today; payments/compliance/reconciler/withdrawals deferred) + audit logger
+  admin/        admin resource endpoints — merchants, payments, compliance, reconciler, withdrawal-attempts — + audit logger
   common/       shared asset resolution (XLM/USDC)
   db/           Postgres pool
 reconciler/     Rust binary — watches Horizon, writes confirmed payments
@@ -309,8 +323,9 @@ one, not a generic template.
 - **Compliance check shells out to the `stellar` CLI** rather than calling Soroban RPC directly — reasonable for a pilot, a real follow-up before scale.
 - **The reconciler watches one merchant address per process.** Fine for a pilot; a real deployment needs either one process per merchant or a multi-account watch loop.
 - Fails open, loudly, if the compliance contract is unreachable (logged, never silent) — a deliberate choice, not an oversight.
-- **Admin workflow is deliberately Slice 1 of 2**: identity plus merchant suspend/reactivate is built and shipped; payment review, an address-level compliance blocklist, reconciler status/rewind, and withdrawal-attempt tracking are a designed-but-deferred second slice, held back until this slice has seen real use rather than built speculatively alongside it.
-- **`admin/merchants` pagination is simple limit/offset** with no search or filtering beyond that — matches the pilot's current scale.
+- **The compliance blocklist and reconciler rewind guard don't reach the SEP-7/QR checkout path or process-level coordination respectively** — see the [Admin](#admin) section above for exactly what each does and doesn't cover.
+- **Withdrawal-attempt tracking is visibility only** — Konfirm has no authority over the anchor's own transaction state, so there's no admin "resolve this" action, only a record of what the anchor last reported.
+- **`admin/merchants` and `admin/payments` pagination is simple limit/offset** with no search or filtering beyond a single status field — matches the pilot's current scale.
 
 ## License
 
