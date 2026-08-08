@@ -56,7 +56,7 @@ export class PaymentsService {
   // rules can't drift between them.
   private async loadPayableLink(linkId: string) {
     const linkRes = await pool.query(
-      `SELECT l.id, l.amount_usdc, l.currency, l.active, l.expires_at, m.stellar_base_address
+      `SELECT l.id, l.amount_usdc, l.currency, l.active, l.expires_at, m.stellar_base_address, m.status AS merchant_status
        FROM links l JOIN merchants m ON m.id = l.merchant_id
        WHERE l.id = $1`,
       [linkId],
@@ -72,6 +72,12 @@ export class PaymentsService {
     }
     if (!link.stellar_base_address) {
       throw new BadRequestException('merchant has no Stellar address configured');
+    }
+    // A suspended merchant's links stop accepting payment immediately — the
+    // real teeth of a suspension, not just locking them out of their own
+    // dashboard (see auth.guard.ts).
+    if (link.merchant_status !== 'active') {
+      throw new BadRequestException('this merchant is not currently accepting payments');
     }
     return link;
   }

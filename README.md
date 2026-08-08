@@ -120,9 +120,38 @@ All endpoints are JSON unless noted. Routes marked 🔒 require a valid `konfirm
 | `GET` | `/withdrawals/status` 🔒 | `token, id` | Polls the anchor's transaction status |
 | `POST` | `/withdrawals/prepare-payment` 🔒 | `currency, token, id` | Once the anchor is ready (`pending_user_transfer_start`), builds the on-chain payment to the anchor's account for the merchant to sign |
 
+### Admin
+
+Routes marked 🔐 require a valid `konfirm_admin_session` cookie — a completely separate identity from a merchant's `konfirm_session` (see [Admin auth](#admin-auth) below).
+
+| Method | Path | Body | Notes |
+|---|---|---|---|
+| `POST` | `/admin/auth/login` | `email, password` | Same no-enumeration error as merchant login |
+| `POST` | `/admin/auth/logout` | — | Clears the admin session cookie |
+| `GET` | `/admin/auth/me` 🔐 | — | Current admin's claims |
+| `GET` | `/admin/merchants` 🔐 | — | All merchants, newest first (`?limit`, `?offset`) |
+| `PATCH` | `/admin/merchants/:id/status` 🔐 | `status: 'active'\|'suspended', reason?` | Takes effect immediately — see below, this isn't just a future-login gate |
+| `GET` | `/admin/activity` 🔐 | — | Recent admin actions, newest first (`?limit`) — every mutation above logs here |
+
+This is Slice 1 of the admin workflow: identity plus merchant management. Payment review, an address-level compliance blocklist, reconciler status/control, and withdrawal-attempt tracking are a deliberately deferred second slice — see [Known limitations](#known-limitations).
+
 ## Auth
 
 Sessions are an httpOnly JWT cookie (`konfirm_session`, 30-day expiry, `SameSite=Lax`). Passwords are bcrypt-hashed. `AuthGuard` attaches `req.merchant` (id, email, name, `stellar_base_address`) to any route behind it — controllers derive identity from this, never from a client-supplied field.
+
+A suspended merchant is rejected in two places, not one: `login()` rejects it outright, and `AuthGuard` re-checks `merchants.status` on every authenticated request (one extra indexed lookup) so an **already-issued** session cookie stops working the instant an admin suspends the account — not just on the merchant's next login. `payments.service.ts`'s `loadPayableLink()` checks the same column, so a suspended merchant's payment links stop accepting money too, not only their own dashboard access.
+
+### Admin auth
+
+A fully separate identity system from merchant auth — admins aren't merchants with a flag, they're a different table (`admins`), a different JWT secret (`ADMIN_JWT_SECRET`, own insecure-dev-default warning, never the merchant `JWT_SECRET`), a different cookie (`konfirm_admin_session`, `SameSite=Strict`, 12-hour expiry vs. the merchant cookie's 30 days — a higher-privilege surface gets a shorter-lived session), and its own guard (`AdminGuard`). A leaked merchant secret can't forge an admin session, or vice versa.
+
+**There is deliberately no `POST /admin/auth/signup`.** An internet-facing "create an admin account" endpoint is its own security problem for a surface that can suspend merchants and read everyone's data. Admins are provisioned out-of-band instead:
+
+```bash
+npm run seed:admin -- ops@example.com <password> "Ops Admin"
+```
+
+Every mutation an admin makes is written to `admin_actions` (who, what, on what, when, plus a free-text reason) and surfaced back through `GET /admin/activity` — an audit trail that isn't just written and forgotten.
 
 ## Project structure
 
@@ -133,11 +162,14 @@ src/
   sessions/     muxed-ID reservation against a link
   payments/     prepare-tx (Freighter), pay-uri (SEP-7), compliance check, by-merchant queries
   withdrawals/  SEP-10/SEP-24 fiat off-ramp
+  admin-auth/   separate admin identity — guard, JWT service, login/logout/me controller
+  admin/        admin resource endpoints (merchants today; payments/compliance/reconciler/withdrawals deferred) + audit logger
   common/       shared asset resolution (XLM/USDC)
   db/           Postgres pool
 reconciler/     Rust binary — watches Horizon, writes confirmed payments
 db/migrations/  ordered .up.sql/.down.sql pairs, applied by db/migrate.ts
 db/migrate.ts   the migration runner itself — no framework, tracks applied migrations in Postgres
+db/seed-admin.ts  the only way to create an admin account — no signup endpoint, by design
 scripts/testnet-harness/  standalone Node scripts for exercising payments outside the browser
 ```
 
@@ -276,6 +308,8 @@ one, not a generic template.
 - **Compliance check shells out to the `stellar` CLI** rather than calling Soroban RPC directly — reasonable for a pilot, a real follow-up before scale.
 - **The reconciler watches one merchant address per process.** Fine for a pilot; a real deployment needs either one process per merchant or a multi-account watch loop.
 - Fails open, loudly, if the compliance contract is unreachable (logged, never silent) — a deliberate choice, not an oversight.
+- **Admin workflow is deliberately Slice 1 of 2**: identity plus merchant suspend/reactivate is built and shipped; payment review, an address-level compliance blocklist, reconciler status/rewind, and withdrawal-attempt tracking are a designed-but-deferred second slice, held back until this slice has seen real use rather than built speculatively alongside it.
+- **`admin/merchants` pagination is simple limit/offset** with no search or filtering beyond that — matches the pilot's current scale.
 
 ## License
 

@@ -1,4 +1,4 @@
-import { ConflictException, Injectable, UnauthorizedException } from '@nestjs/common';
+import { ConflictException, ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common';
 import * as bcrypt from 'bcryptjs';
 import * as jwt from 'jsonwebtoken';
 import { pool } from '../db/pool';
@@ -41,7 +41,7 @@ export class AuthService {
 
   async login(email: string, password: string): Promise<{ token: string; merchant: MerchantClaims }> {
     const { rows } = await pool.query(
-      'SELECT id, email, name, stellar_base_address, password_hash FROM merchants WHERE email = $1',
+      'SELECT id, email, name, stellar_base_address, password_hash, status FROM merchants WHERE email = $1',
       [email],
     );
     // Same generic error whether the email doesn't exist or the password is
@@ -52,6 +52,12 @@ export class AuthService {
     const row = rows[0];
     const ok = await bcrypt.compare(password, row.password_hash);
     if (!ok) throw invalid();
+
+    // A distinct message is fine here, unlike above — a correct password
+    // already confirms the account exists, so this isn't an enumeration risk.
+    if (row.status === 'suspended') {
+      throw new ForbiddenException('this account has been suspended — contact support');
+    }
 
     const merchant: MerchantClaims = {
       id: row.id,

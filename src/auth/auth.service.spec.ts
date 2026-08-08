@@ -1,4 +1,4 @@
-import { ConflictException, UnauthorizedException } from '@nestjs/common';
+import { ConflictException, ForbiddenException, UnauthorizedException } from '@nestjs/common';
 import { pool } from '../db/pool';
 import { AuthService } from './auth.service';
 
@@ -86,5 +86,13 @@ describe('AuthService (integration, real Postgres)', () => {
 
     expect(wrongPasswordMessage).not.toBe('');
     expect(wrongPasswordMessage).toBe(nonexistentEmailMessage);
+  });
+
+  it('rejects login for a suspended merchant even with the correct password', async () => {
+    const email = freshEmail();
+    await auth.signup(email, 'a-fine-password-000', 'Suspend Test', 'GBXBABMFZIJPTOFI6STUXA2FMEXDBB4URBD3VS5XDHKMFHGLJZ5WPQBB');
+    await pool.query("UPDATE merchants SET status = 'suspended' WHERE email = $1", [email]);
+
+    await expect(auth.login(email, 'a-fine-password-000')).rejects.toThrow(ForbiddenException);
   });
 });

@@ -9,6 +9,8 @@ import { SessionsModule } from './sessions/sessions.module';
 import { PaymentsModule } from './payments/payments.module';
 import { WithdrawalsModule } from './withdrawals/withdrawals.module';
 import { DepositsModule } from './deposits/deposits.module';
+import { AdminAuthModule } from './admin-auth/admin-auth.module';
+import { AdminModule } from './admin/admin.module';
 
 const isProd = process.env.NODE_ENV === 'production';
 
@@ -52,6 +54,8 @@ const isProd = process.env.NODE_ENV === 'production';
     PaymentsModule,
     WithdrawalsModule,
     DepositsModule,
+    AdminAuthModule,
+    AdminModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },

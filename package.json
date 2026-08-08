@@ -7,7 +7,8 @@
     "build": "tsc -p tsconfig.json",
     "test": "jest",
     "migrate:up": "ts-node -r tsconfig-paths/register db/migrate.ts up",
-    "migrate:down": "ts-node -r tsconfig-paths/register db/migrate.ts down"
+    "migrate:down": "ts-node -r tsconfig-paths/register db/migrate.ts down",
+    "seed:admin": "ts-node -r tsconfig-paths/register db/seed-admin.ts"
   },
   "dependencies": {
     "@nestjs/common": "^11.1.28",
