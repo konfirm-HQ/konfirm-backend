@@ -3,7 +3,12 @@
 # officially documented way to get it — chosen over downloading a prebuilt
 # release binary, since asset-naming conventions can't be verified without
 # a real Docker build to test against on this machine.
-FROM rust:1-slim AS stellar-cli
+FROM rust:1-bookworm AS stellar-cli
+# Pinned to bookworm explicitly, matching node:20-slim's own bookworm base
+# below — `rust:1-slim` floats to whatever Debian release is current, which
+# produced a stellar CLI binary linked against a newer glibc than the
+# runtime image ships (confirmed live in reconciler/Dockerfile's identical
+# builder — same fix applied here for the same reason).
 # build-essential (gcc/g++/make) and libdbus-1-dev are both required by
 # stellar-cli's native dependencies (cc-rs needs a real C++ compiler;
 # libdbus-sys needs D-Bus headers to compile at all, even though the

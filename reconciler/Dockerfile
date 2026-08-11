@@ -1,4 +1,10 @@
-FROM rust:1-slim AS builder
+# Pinned to bookworm explicitly, matching the runtime stage's
+# debian:bookworm-slim below — `rust:1-slim` floats to whatever Debian
+# release is current, which had drifted ahead of bookworm and produced a
+# binary linked against a newer glibc than the runtime image ships
+# ("GLIBC_2.38/2.39 not found"), crash-looping the container. Confirmed live
+# against a real failed deployment, not a defensive guess.
+FROM rust:1-bookworm AS builder
 # build-essential (gcc/g++/make) and libdbus-1-dev are both required by
 # stellar-cli's native dependencies (cc-rs needs a real C++ compiler;
 # libdbus-sys needs D-Bus headers to compile at all, even though the
