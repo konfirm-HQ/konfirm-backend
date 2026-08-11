@@ -103,10 +103,10 @@ Compare `updated_at` on the cursor row against the current time — if it hasn't
 the poll interval (default 3s) times a large margin, the reconciler isn't running or is stuck.
 
 **Respond:**
-- If the process isn't running at all: it needs the shell-loop wrapper documented in the backend
-  README (`while true; do cargo run -- watch ...; done`) — a bare `cargo run -- watch` exits after
-  finding one match by design (a demo-loop leftover, see `main.rs`), which looks like a hang if run
-  without the wrapper.
+- If the process isn't running at all: restart it (`watch` now polls continuously until `max_polls` or
+  a real error — it no longer exits after finding one match, that was a demo-loop leftover removed once
+  this was deployed for real). In production this is the hosting platform's restart-on-exit policy;
+  locally, wrap it in `while true; do cargo run -- watch ...; done` as the same safety net.
 - If it's running but the cursor is stale: check its stdout for repeated `Horizon request failed,
   retrying after backoff` — that's incident #1 again, propagating downstream.
 - **Never** manually `set-cursor` forward past unprocessed payments to "fix" a stuck reconciler — that

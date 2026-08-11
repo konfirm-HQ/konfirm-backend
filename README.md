@@ -27,6 +27,7 @@ Cashing out to a bank account is a real SEP-10 (auth) + SEP-24 (interactive with
 - Node.js 20+
 - PostgreSQL 15+, running locally
 - Rust (stable) — only needed to run the reconciler
+- The [`stellar` CLI](https://developers.stellar.org/docs/tools/cli/install-cli), on `PATH`, with a `deployer` identity configured (`stellar keys add deployer --secret-key ...`) — used for the on-chain compliance check, by both the API (`payments.service.ts`'s Freighter-path check) and the reconciler (the SEP-7/QR-path check, added after the fact — see [Compliance](#compliance) below). This was already an implicit requirement for running the API; it's stated explicitly here now that it's unavoidable for the reconciler too.
 - [Freighter](https://www.freighter.app/) browser extension, set to Testnet, for exercising checkout yourself
 
 ## Setup
@@ -78,7 +79,7 @@ DATABASE_URL=postgres://you@localhost:5432/konfirm_dev \
 | `watch` | `watch <merchant_address> [max_polls=20] [interval_secs=3]` | Poll Horizon for new payments to this address and record confirmed ones |
 | `set-cursor` | `set-cursor <value\|'now'>` | Manually reset the Horizon paging cursor — a deliberate recovery/replay escape hatch, not a routine command |
 
-`watch` exits after its first match by default — for a live session it needs to be wrapped in a loop (`while true; do cargo run -- watch ...; done`) so it keeps watching after each match.
+`watch` keeps polling continuously — it only stops on hitting `max_polls` (default 20; the production Docker image defaults this to a very large number via `RECONCILER_MAX_POLLS`, see [Deployment](#deployment)) or a real error. It used to exit after its very first match (a "demo" convenience from early in this project's life); that behavior was removed once this was actually being deployed, since restarting the whole process — reconnecting to Postgres, re-resolving the merchant — after every single payment was real overhead a production reconciler shouldn't pay. For a long-running local session, still wrap it in a restart loop (`while true; do cargo run -- watch ...; done`) as a safety net against an unhandled error, same as production relies on the hosting platform's own restart-on-exit policy for the same reason.
 
 ## API reference
 
@@ -144,7 +145,7 @@ Routes marked 🔐 require a valid `konfirm_admin_session` cookie — a complete
 
 This was originally split into two delivery slices — identity plus merchant management shipped first, alone, before the rest — deliberately, so the newest and highest-privilege part of the system (a second, separate login) got proven in real use before more was built on top of it. Both slices are now built.
 
-**The compliance blocklist only covers the Freighter path** (`POST /payments/prepare-tx`). The SEP-7/QR checkout path (`GET /payments/pay-uri`) still has no payer address at request time to check against anything — the same limitation the on-chain compliance contract already has, not something this blocklist changes either way.
+**The compliance blocklist covers both checkout paths, but at different points.** On the Freighter path (`POST /payments/prepare-tx`) it's checked before a transaction is ever built. On the SEP-7/QR path there's still no payer address at request time to check against anything — but the reconciler now checks every confirmed payment's payer against this same table (and the on-chain contract) immediately after recording it, holding it for review if flagged. See [Compliance](#compliance) for the full design.
 
 **The reconciler rewind endpoint enforces backward-only**, in code, for the first time — previously this was only ever the reconciler CLI's `set-cursor` command plus a warning in `docs/RUNBOOK.md` §4 ("never manually set-cursor forward past unprocessed payments — that permanently skips real transactions"). The stored cursor is either the literal string `'now'` or a numeric Horizon paging token; moving off `'now'` to any real position is always allowed, but moving back *to* `'now'`, or to any numeric value ahead of the current one, is rejected with a 400. This does **not** add process coordination — if the Rust reconciler is actively running when an admin rewinds, the same race that already existed with the CLI tool still exists; this endpoint adds a correctness guard, not a lock.
 
@@ -261,17 +262,25 @@ script.
 ## Backups
 
 ```bash
-db/scripts/backup.sh konfirm_dev              # dumps to db/backups/, prunes to the last 14
-db/scripts/restore.sh <dump_file> <target_db>  # restores; refuses to clobber a non-empty DB without FORCE=1
+db/scripts/backup.sh konfirm_dev                     # dumps to db/backups/, prunes to the last 14
+BACKUP_S3_BUCKET=my-bucket db/scripts/backup.sh konfirm_dev   # also uploads off-machine
+db/scripts/restore.sh <dump_file|s3://bucket/key> <target_db>  # restores; refuses to clobber a non-empty DB without FORCE=1
 ```
 
-A daily backup runs via cron (`crontab -l` to see it) at 03:00. Both scripts have been run for real —
-restoring into a scratch database and diffing every table's row count against the original, not just
-checking that `pg_dump` exited zero.
+| Variable | Required | Notes |
+|---|---|---|
+| `BACKUP_S3_BUCKET` | No | If set, `backup.sh` uploads the dump here (via the `aws` CLI) immediately after taking it, before any local pruning runs. If unset, behavior is unchanged from before — local-only, no AWS account needed for day-to-day dev use. |
 
-**This is not a real backup strategy yet** — it's a local file on the same disk as the database it's
-backing up. A drive failure takes out both. Before this matters for real: ship dumps to a second
-location (S3, another machine) as part of the same script.
+Real off-machine storage now, not just a local file — a dump uploads to S3 (or an S3-compatible bucket)
+before anything local ever gets pruned, so a local disk failure doesn't take out every backup along
+with the database. `restore.sh` accepts an `s3://` URI directly and fetches it to a temp path first, so
+restoring from the real off-machine copy is the same one command as restoring from a local file.
+
+Locally, a daily backup still runs via cron (`crontab -l` to see it) at 03:00 — this is dev-machine
+scheduling only, not something checked into git; the production equivalent is a Railway Cron Job
+service (see [Deployment](#deployment)) running against the database's private connection string,
+never a host crontab. Both scripts have been run for real — restoring into a scratch database and
+diffing every table's row count against the original, not just checking that `pg_dump` exited zero.
 
 ## Rate limiting
 
@@ -307,6 +316,39 @@ The Rust reconciler's `reqwest::Client` had no timeout at all by default; it now
 retry-with-backoff on Horizon polling, on top of the existing shell-level `while true` restart loop
 documented above.
 
+## Compliance
+
+Every payment is screened against the same deployed Soroban contract (`is_allowed`, contract id
+`CDDVLE2DZQAYFY3Z2Z74TUNNPC4ROUACSBXOB2P64IT75EZFAQXSRSXY`), invoked via the `stellar` CLI — but the
+two checkout paths screen at different points, because only one of them has a payer address to check
+before the money moves:
+
+- **Freighter checkout** (`payments.service.ts`'s `isPayerAllowed`) — before any transaction is built.
+  Checks the local `blocked_addresses` table first (instant, fails closed on a hit), then the on-chain
+  contract (fails open if unreachable, logged). A blocked address never receives a transaction to sign.
+- **SEP-7/QR checkout** — the payer's own wallet builds and submits the transaction directly to the
+  network; Konfirm never sees an address to check until the reconciler observes the confirmed payment
+  on Horizon. This was a real, repeatedly-documented gap — screening it *before* the fact is
+  architecturally impossible here, so the reconciler screens it immediately *after*, instead of not
+  screening it at all:
+  - The local blocklist check runs synchronously, in the reconciler's poll loop — it's a cheap
+    in-process read, so a locally-blocked payer's payment lands as `held` the instant it's recorded.
+  - The on-chain check runs **decoupled**, in a spawned background task, after the payment is already
+    inserted as `paid` — if it comes back non-compliant, the row is flipped to `held` a few seconds
+    later for admin review (`/admin/payments?status=held`). It deliberately does *not* run inline in the
+    poll loop: that loop is strictly sequential, and blocking it on an ~8s worst-case external process
+    call, once per payment, risks the reconciler itself falling behind — a worse, already-documented
+    incident (see [Incidents](#incidents) below) than a flagged payment sitting as `paid` for a few
+    extra seconds. The money has already moved on-chain either way by the time this runs; the check was
+    never going to be prevention, only after-the-fact review.
+  - A background check can be lost if the reconciler process is killed abruptly mid-check (a clean exit
+    joins all pending checks first; a hard kill doesn't) — an accepted, documented gap consistent with
+    the existing fail-open philosophy, not a new category of risk.
+
+Verified for real: a locally-blocked test payer's payment landed as `held` immediately; a normal
+payer's landed as `paid` immediately, with the background check confirmed to run (via logs) and not
+flip a clean payment's status. Not simulated — both against real signed testnet transactions.
+
 ## Incidents
 
 [`docs/RUNBOOK.md`](docs/RUNBOOK.md) — four incidents in order of likelihood, three of which already
@@ -319,13 +361,57 @@ one, not a generic template.
 
 - **Testnet only.** Mainnet needs a funded production USDC issuer, `JWT_SECRET` in a real secrets manager, and HTTPS in front of the session cookie.
 - **XLM and USDC only.** `EURC` is accepted by validation but not implemented in `prepareTx` or `buildPayUri`.
-- **Compliance screening only runs on the Freighter path.** The QR/SEP-7 path has no payer address to check before the wallet submits — screening there is necessarily after the fact.
-- **Compliance check shells out to the `stellar` CLI** rather than calling Soroban RPC directly — reasonable for a pilot, a real follow-up before scale.
+- **SEP-7/QR compliance screening is after-the-fact, not preventive** — by the time the reconciler can check it, the payment has already landed on-chain. See [Compliance](#compliance) for the full design; this is an architectural ceiling of the SEP-7 flow itself, not something a code change on Konfirm's side can move earlier.
+- **Compliance check shells out to the `stellar` CLI** rather than calling Soroban RPC directly — reasonable for a pilot, a real follow-up before scale. Now a dependency of the reconciler too, not just the API.
 - **The reconciler watches one merchant address per process.** Fine for a pilot; a real deployment needs either one process per merchant or a multi-account watch loop.
 - Fails open, loudly, if the compliance contract is unreachable (logged, never silent) — a deliberate choice, not an oversight.
 - **The compliance blocklist and reconciler rewind guard don't reach the SEP-7/QR checkout path or process-level coordination respectively** — see the [Admin](#admin) section above for exactly what each does and doesn't cover.
 - **Withdrawal-attempt tracking is visibility only** — Konfirm has no authority over the anchor's own transaction state, so there's no admin "resolve this" action, only a record of what the anchor last reported.
 - **`admin/merchants` and `admin/payments` pagination is simple limit/offset** with no search or filtering beyond a single status field — matches the pilot's current scale.
+
+## Deployment
+
+Three services on [Railway](https://railway.com), one project, sharing a managed Postgres add-on over
+private networking:
+
+| Service | Root / Dockerfile | Public? | Purpose |
+|---|---|---|---|
+| `api` | `/Dockerfile` | Yes | The NestJS app — `railway.json` at repo root |
+| `reconciler` | `reconciler/Dockerfile` | No | Watches Horizon, writes confirmed payments — `reconciler/railway.json`, restart-always |
+| backup cron | repo root, custom start command | No | Runs `db/scripts/backup.sh` on a schedule against the private `DATABASE_URL` — configured directly in the Railway dashboard as a Cron Job service, not a checked-in config file (a third service sharing the repo root can't share the default-discovered `railway.json` filename with `api`) |
+
+Both Dockerfiles build the `stellar` CLI from source (`cargo install --locked stellar-cli`) — it's a
+real dependency of both the API (Freighter-path compliance check) and the reconciler (the SEP-7-path
+check added in this session), not something either can run without. The `deployer` identity used
+locally throughout development doesn't exist in a container (registering one non-interactively isn't
+possible — confirmed by hand: the CLI's `--secret-key` flag requires a real TTY prompt, even a piped
+stdin doesn't satisfy it), so both `payments.service.ts` and `compliance.rs` pass the account via
+`--source-account`, using `STELLAR_DEPLOYER_SECRET_KEY` directly if set, falling back to the local
+`deployer` identity by name if not — one code path that's correct in both environments.
+
+The reconciler's `watch` used to exit after finding a single payment (a "demo" convenience) — that was
+removed once this was actually being deployed, since restarting the whole process after every payment
+was real, avoidable overhead. It now polls continuously until `RECONCILER_MAX_POLLS` (defaults to a
+very large number in the container) or a real error, at which point the platform's restart-on-exit
+policy relaunches it — same safety net `while true; do cargo run -- watch ...; done` provides locally.
+
+See `.env.example` for the complete list of environment variables to set on each service.
+
+### What only a human can do here
+
+I don't have credentials for any of this — these steps need to be done directly, not asked for:
+
+- Create the Railway project, the three services above, and the Postgres add-on; paste in the env vars
+  from `.env.example`; provide the real `STELLAR_DEPLOYER_SECRET_KEY` (export it from wherever the
+  local `deployer` identity's secret already lives: `stellar keys secret deployer`); trigger the first
+  deploy.
+- Create an S3 bucket (or an S3-compatible equivalent) and scoped IAM credentials for it; add them as
+  env vars on the backup cron service.
+- Point `konfirm-frontend`'s Vercel deployment's `BACKEND_URL` at this API's public URL once it exists.
+- After the first deploy, over real HTTPS: confirm login actually works end to end. Both session
+  cookies now set `secure` automatically from `NODE_ENV` (see `auth.controller.ts` /
+  `admin-auth.controller.ts`) rather than needing a manual code edit, but that's still worth verifying
+  against the real deployed URL rather than assumed.
 
 ## License
 

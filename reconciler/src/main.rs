@@ -1,3 +1,4 @@
+mod compliance;
 mod horizon;
 mod muxed;
 mod store;
@@ -74,6 +75,13 @@ async fn watch(merchant_address: &str, max_polls: u32, interval_secs: u64) -> Re
         store.set_cursor(&cursor).await?;
     }
 
+    // Background on-chain compliance checks spawned below — collected here
+    // so a clean exit from this function (either return point) waits for
+    // them rather than dropping a pending check silently. An abrupt kill of
+    // the whole process can still drop one; that's an accepted gap, matching
+    // the existing fail-open philosophy rather than a new category of risk.
+    let mut pending_checks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+
     let mut found_any = false;
     for poll_num in 1..=max_polls {
         tracing::info!(poll_num, cursor, "polling horizon");
@@ -122,7 +130,7 @@ async fn watch(merchant_address: &str, max_polls: u32, interval_secs: u64) -> Re
             let amount = op.amount.as_deref().unwrap_or("0");
             let muxed_address = op.to_muxed.clone().unwrap_or_else(|| op.to.clone().unwrap_or_default());
 
-            let is_new = store
+            let recorded = store
                 .record_payment_if_new(
                     &merchant,
                     muxed_id as i64,
@@ -136,7 +144,7 @@ async fn watch(merchant_address: &str, max_polls: u32, interval_secs: u64) -> Re
                 )
                 .await?;
 
-            if is_new {
+            if let Some(recorded) = recorded {
                 tracing::info!(
                     muxed_id,
                     merchant_id = %merchant.id,
@@ -144,9 +152,34 @@ async fn watch(merchant_address: &str, max_polls: u32, interval_secs: u64) -> Re
                     amount = %amount,
                     asset = %asset_code,
                     tx_hash = %op.transaction_hash,
+                    locally_blocked = recorded.locally_blocked,
                     "MATCHED: payment recorded in Postgres with real fee math"
                 );
                 found_any = true;
+
+                // Already flagged and held via the cheap local check above —
+                // no need for the slower on-chain check too.
+                if !recorded.locally_blocked {
+                    let store = store.clone();
+                    let payer = payer.clone();
+                    let payment_id = recorded.id;
+                    pending_checks.push(tokio::spawn(async move {
+                        if !compliance::is_allowed_on_chain(&payer).await {
+                            match store.mark_held(payment_id).await {
+                                Ok(()) => tracing::warn!(
+                                    payment_id = %payment_id,
+                                    payer = %payer,
+                                    "payment flagged by on-chain compliance check after the fact — marked held for review"
+                                ),
+                                Err(err) => tracing::warn!(
+                                    payment_id = %payment_id,
+                                    error = %err,
+                                    "failed to mark a compliance-flagged payment held"
+                                ),
+                            }
+                        }
+                    }));
+                }
             } else {
                 tracing::debug!(paging_token = %op.paging_token, "already seen — dedup no-op, as expected on replay");
             }
@@ -159,16 +192,24 @@ async fn watch(merchant_address: &str, max_polls: u32, interval_secs: u64) -> Re
             store.set_cursor(&cursor).await?;
         }
 
-        if found_any {
-            tracing::info!("match confirmed — exiting demo watch loop early");
-            return Ok(());
-        }
-
         tokio::time::sleep(Duration::from_secs(interval_secs)).await;
     }
 
     if !found_any {
         tracing::warn!("no matching payment observed within the polling budget");
     }
+    await_pending_checks(pending_checks).await;
     Ok(())
+}
+
+// A clean exit from watch() waits for any in-flight background compliance
+// checks rather than dropping them — see the comment where pending_checks
+// is declared. A failed/panicked task is logged, not propagated: losing one
+// compliance re-check must never crash the reconciler.
+async fn await_pending_checks(pending_checks: Vec<tokio::task::JoinHandle<()>>) {
+    for handle in pending_checks {
+        if let Err(err) = handle.await {
+            tracing::warn!(error = %err, "a background compliance check task panicked");
+        }
+    }
 }

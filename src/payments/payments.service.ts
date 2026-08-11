@@ -46,7 +46,25 @@ export class PaymentsService {
         () =>
           execFileAsync(
             'stellar',
-            ['contract', 'invoke', '--id', COMPLIANCE_CONTRACT_ID, '--source', 'deployer', '--network', 'testnet', '--', 'is_allowed', '--addr', address],
+            [
+              'contract',
+              'invoke',
+              '--id',
+              COMPLIANCE_CONTRACT_ID,
+              // A raw secret key in production (STELLAR_DEPLOYER_SECRET_KEY,
+              // set as a deploy-time env var — no interactive `stellar keys
+              // add` step is possible in a container), or the locally
+              // pre-registered 'deployer' identity in dev. One code path
+              // handles both correctly.
+              '--source-account',
+              process.env.STELLAR_DEPLOYER_SECRET_KEY ?? 'deployer',
+              '--network',
+              'testnet',
+              '--',
+              'is_allowed',
+              '--addr',
+              address,
+            ],
             { timeout: 8_000 },
           ),
         { retries: 1, baseDelayMs: 500, timeoutMs: 9_000 },
