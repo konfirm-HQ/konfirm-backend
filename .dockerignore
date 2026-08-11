@@ -1,0 +1,11 @@
+node_modules
+npm-debug.log
+.git
+.env
+.env.*
+!.env.example
+db/backups
+reconciler/target
+*.tsbuildinfo
+coverage
+.DS_Store

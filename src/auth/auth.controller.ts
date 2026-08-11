@@ -72,9 +72,12 @@ export class AuthController {
     res.cookie(SESSION_COOKIE, token, {
       httpOnly: true,
       sameSite: 'lax',
-      // Not marked `secure` because the pilot runs over plain http on
-      // localhost — this must flip to true the moment this is served over
-      // HTTPS, or the cookie should stop being sent at all.
+      // Driven by NODE_ENV rather than a manual flip at deploy time — plain
+      // http locally (NODE_ENV unset/development), real HTTPS wherever
+      // NODE_ENV=production is actually set (see README's Deployment
+      // section), so this is correct by construction instead of relying on
+      // someone remembering to edit this after the first real deploy.
+      secure: process.env.NODE_ENV === 'production',
       maxAge: COOKIE_MAX_AGE_MS,
     });
   }

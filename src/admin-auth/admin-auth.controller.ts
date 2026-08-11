@@ -54,8 +54,9 @@ export class AdminAuthController {
       // Stricter than the merchant cookie's 'lax' — this guards mutation of
       // other people's accounts, not just the admin's own session.
       sameSite: 'strict',
-      // Not marked `secure` for the same localhost-http reason as the
-      // merchant cookie — must flip the moment this is served over HTTPS.
+      // Same NODE_ENV-driven reasoning as the merchant cookie — see
+      // auth.controller.ts's setSessionCookie.
+      secure: process.env.NODE_ENV === 'production',
       maxAge: COOKIE_MAX_AGE_MS,
     });
   }
