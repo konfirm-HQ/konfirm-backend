@@ -4,7 +4,7 @@ FROM rust:1-slim AS builder
 # libdbus-sys needs D-Bus headers to compile at all, even though the
 # --secure-store feature that actually uses D-Bus is never invoked here) —
 # both confirmed the hard way against two separate failed Railway builds.
-RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev ca-certificates build-essential libdbus-1-dev \
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev ca-certificates build-essential libdbus-1-dev libudev-dev \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
