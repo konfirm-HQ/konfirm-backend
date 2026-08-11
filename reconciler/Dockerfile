@@ -1,8 +1,10 @@
 FROM rust:1-slim AS builder
-# build-essential (gcc/g++/make) is required by stellar-cli's native
-# dependencies (cc-rs needs a real C++ compiler) — confirmed the hard way:
-# `rust:1-slim` alone fails with "failed to find tool \"c++\"".
-RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev ca-certificates build-essential \
+# build-essential (gcc/g++/make) and libdbus-1-dev are both required by
+# stellar-cli's native dependencies (cc-rs needs a real C++ compiler;
+# libdbus-sys needs D-Bus headers to compile at all, even though the
+# --secure-store feature that actually uses D-Bus is never invoked here) —
+# both confirmed the hard way against two separate failed Railway builds.
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev ca-certificates build-essential libdbus-1-dev \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
