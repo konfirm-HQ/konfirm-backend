@@ -18,7 +18,19 @@ pg_dump -Fc "$DB_NAME" > "$OUT_FILE"
 
 echo "Backed up '$DB_NAME' to $OUT_FILE ($(du -h "$OUT_FILE" | cut -f1))"
 
+# Off-machine copy, before anything local gets pruned below — a local-only
+# backup doesn't survive the disk it's sitting on failing. Set
+# BACKUP_S3_BUCKET to enable; unset is still a normal local-only backup, so
+# this stays free to run without an AWS account for day-to-day dev use.
+if [ -n "${BACKUP_S3_BUCKET:-}" ]; then
+  aws s3 cp "$OUT_FILE" "s3://${BACKUP_S3_BUCKET}/$(basename "$OUT_FILE")"
+  echo "Uploaded to s3://${BACKUP_S3_BUCKET}/$(basename "$OUT_FILE")"
+else
+  echo "BACKUP_S3_BUCKET not set — skipping off-machine upload (this backup only exists locally)." >&2
+fi
+
 # Keep the last 14 backups locally, prune older ones — this is NOT a
-# substitute for offsite storage (see README note), just bounds local disk
-# usage for day-to-day dev use.
+# substitute for offsite storage, just bounds local disk usage for
+# day-to-day dev use. Pruning only ever happens after the upload above, so
+# nothing is deleted locally before it's shipped off-machine.
 ls -1t "$BACKUP_DIR"/"${DB_NAME}"_*.dump 2>/dev/null | tail -n +15 | xargs rm --
