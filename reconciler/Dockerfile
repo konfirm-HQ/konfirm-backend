@@ -1,5 +1,8 @@
 FROM rust:1-slim AS builder
-RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev ca-certificates \
+# build-essential (gcc/g++/make) is required by stellar-cli's native
+# dependencies (cc-rs needs a real C++ compiler) — confirmed the hard way:
+# `rust:1-slim` alone fails with "failed to find tool \"c++\"".
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev ca-certificates build-essential \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./

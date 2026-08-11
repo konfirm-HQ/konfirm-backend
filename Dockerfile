@@ -4,7 +4,10 @@
 # release binary, since asset-naming conventions can't be verified without
 # a real Docker build to test against on this machine.
 FROM rust:1-slim AS stellar-cli
-RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev ca-certificates \
+# build-essential (gcc/g++/make) is required by stellar-cli's native
+# dependencies (cc-rs needs a real C++ compiler) — confirmed the hard way:
+# `rust:1-slim` alone fails with "failed to find tool \"c++\"".
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev ca-certificates build-essential \
     && rm -rf /var/lib/apt/lists/*
 RUN cargo install --locked stellar-cli --root /out
 
