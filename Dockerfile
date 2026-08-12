@@ -20,16 +20,16 @@ RUN cargo install --locked stellar-cli --root /out
 
 FROM node:20-slim
 WORKDIR /app
-# libdbus-1-dev (builder stage, above) satisfies the *compile-time* header
-# dependency for libdbus-sys, but the compiled `stellar` binary also carries
-# a hard *runtime* dynamic-link dependency on libdbus-1.so.3 — confirmed
-# live in production ("error while loading shared libraries: libdbus-1.so.3")
-# even though the --secure-store feature that's the only thing that
-# actually calls into D-Bus is never invoked here. Linux resolves all of a
-# binary's linked libraries at process startup, not lazily per feature, so
-# the runtime image needs the shared library itself (no -dev suffix — just
-# the .so, not headers) or `stellar` refuses to start at all.
-RUN apt-get update && apt-get install -y --no-install-recommends libdbus-1-3 \
+# The builder stage's -dev packages (libssl-dev, libdbus-1-dev,
+# libudev-dev) satisfy *compile-time* header dependencies, but the compiled
+# `stellar` binary also carries hard *runtime* dynamic-link dependencies on
+# their plain .so libraries — confirmed live in production one at a time
+# ("libdbus-1.so.3", then "libssl.so.3") even though the features that
+# actually use D-Bus/hardware wallets are never invoked here. Linux resolves
+# all of a binary's linked libraries at process startup, not lazily per
+# feature, so all three runtime libraries are installed together here
+# rather than repeating this discovery a third time for libudev.
+RUN apt-get update && apt-get install -y --no-install-recommends libssl3 libdbus-1-3 libudev1 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=stellar-cli /out/bin/stellar /usr/local/bin/stellar
 
