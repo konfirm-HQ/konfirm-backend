@@ -29,7 +29,13 @@ WORKDIR /app
 # all of a binary's linked libraries at process startup, not lazily per
 # feature, so all three runtime libraries are installed together here
 # rather than repeating this discovery a third time for libudev.
-RUN apt-get update && apt-get install -y --no-install-recommends libssl3 libdbus-1-3 libudev1 \
+# ca-certificates was only ever installed in the builder stage above (where
+# it did nothing useful — cargo doesn't need it) and never in this runtime
+# stage, so `stellar`'s TLS connection to the RPC endpoint had no CA bundle
+# to verify against ("client error (Connect)" in production). This is the
+# same on-chain check payments.service.ts's isAllowedOnChain uses for
+# regular checkout, so this gap predates x402 entirely.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libssl3 libdbus-1-3 libudev1 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=stellar-cli /out/bin/stellar /usr/local/bin/stellar
 
