@@ -23,7 +23,15 @@ RUN cargo build --release
 RUN cargo install --locked stellar-cli --root /out
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+# libdbus-1-3 (the runtime .so, not the -dev headers already used by the
+# builder stage) — the compiled `stellar` binary carries a hard dynamic-link
+# dependency on libdbus-1.so.3 even though the --secure-store feature that
+# actually calls into D-Bus is never invoked here. Confirmed live in
+# production ("error while loading shared libraries: libdbus-1.so.3") via
+# the same binary in konfirm-backend/Dockerfile — this stage had the
+# identical gap and would fail open on every on-chain compliance check the
+# moment a real SEP-7/QR payment triggered one.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libdbus-1-3 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /build/target/release/konfirm-reconciler /usr/local/bin/konfirm-reconciler
 COPY --from=builder /out/bin/stellar /usr/local/bin/stellar
