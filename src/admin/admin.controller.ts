@@ -9,6 +9,7 @@ import { AdminPaymentsService } from './admin-payments.service';
 import { AdminComplianceService } from './admin-compliance.service';
 import { AdminReconcilerService } from './admin-reconciler.service';
 import { AdminWithdrawalAttemptsService } from './admin-withdrawal-attempts.service';
+import { AdminX402SettlementsService } from './admin-x402-settlements.service';
 
 const setMerchantStatusSchema = z.object({
   status: z.enum(['active', 'suspended']),
@@ -45,6 +46,7 @@ export class AdminController {
     private readonly compliance: AdminComplianceService,
     private readonly reconciler: AdminReconcilerService,
     private readonly withdrawalAttempts: AdminWithdrawalAttemptsService,
+    private readonly x402Settlements: AdminX402SettlementsService,
   ) {}
 
   @Get('stats')
@@ -141,6 +143,13 @@ export class AdminController {
   @Get('withdrawal-attempts')
   listWithdrawalAttempts() {
     return this.withdrawalAttempts.list();
+  }
+
+  // --- x402 settlements ---
+
+  @Get('x402-settlements')
+  listX402Settlements(@Query('status') status?: string, @Query('limit') limit?: string, @Query('offset') offset?: string) {
+    return this.x402Settlements.list(status, limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
   }
 
   // Surfaced back to the admin UI as a recent-activity feed rather than

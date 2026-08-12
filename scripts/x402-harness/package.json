@@ -1,0 +1,19 @@
+{
+  "name": "x402-harness",
+  "version": "1.0.0",
+  "description": "Verification harness proving Konfirm's x402 facilitator (src/x402/) against the official x402 client/server packages, per skills.stellar.org's agentic-payments skill.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "echo \"no automated test; run setup.js then resource-server.js + agent-client.js\" && exit 0"
+  },
+  "dependencies": {
+    "@stellar/stellar-sdk": "^16.2.0",
+    "@x402/core": "^2.22.0",
+    "@x402/express": "^2.22.0",
+    "@x402/fetch": "^2.22.0",
+    "@x402/stellar": "^2.22.0",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1"
+  }
+}

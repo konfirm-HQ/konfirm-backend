@@ -9,6 +9,7 @@ import { AdminPaymentsService } from './admin-payments.service';
 import { AdminComplianceService } from './admin-compliance.service';
 import { AdminReconcilerService } from './admin-reconciler.service';
 import { AdminWithdrawalAttemptsService } from './admin-withdrawal-attempts.service';
+import { AdminX402SettlementsService } from './admin-x402-settlements.service';
 
 @Module({
   imports: [AdminAuthModule, WithdrawalsModule],
@@ -21,6 +22,7 @@ import { AdminWithdrawalAttemptsService } from './admin-withdrawal-attempts.serv
     AdminComplianceService,
     AdminReconcilerService,
     AdminWithdrawalAttemptsService,
+    AdminX402SettlementsService,
   ],
 })
 export class AdminModule {}
