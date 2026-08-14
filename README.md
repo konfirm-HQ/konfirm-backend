@@ -2,7 +2,7 @@
 
 The API and settlement-watching service behind **Konfirm**, a non-custodial payment processor built on Stellar. This repo is a pure JSON API: the NestJS app, the Postgres schema, and a Rust reconciler that watches the chain and turns confirmed transactions into records — nothing here ever holds a merchant's or payer's private key, and nothing here serves a page.
 
-Sibling repos: [konfirm-contracts](https://github.com/samuel2926i39-art/konfirm-contracts) (Soroban contracts, not yet wired into this API's runtime path) and [konfirm-frontend](https://github.com/samuel2926i39-art/konfirm-frontend) (the Next.js app that calls this API — the only place the frontend lives; it proxies to whatever `BACKEND_URL` points at rather than being served from here).
+Sibling repos: [konfirm-contracts](https://github.com/konfirm-HQ/konfirm-contracts) (Soroban contracts, not yet wired into this API's runtime path) and [konfirm-frontend](https://github.com/konfirm-HQ/konfirm-frontend) (the Next.js app that calls this API — the only place the frontend lives; it proxies to whatever `BACKEND_URL` points at rather than being served from here).
 
 ## How it works
 
@@ -415,4 +415,4 @@ I don't have credentials for any of this — these steps need to be done directl
 
 ## License
 
-No license file yet — private project, all rights reserved by default.
+[MIT](LICENSE)
