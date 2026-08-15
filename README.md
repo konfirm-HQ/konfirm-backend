@@ -27,7 +27,7 @@ Cashing out to a bank account is a real SEP-10 (auth) + SEP-24 (interactive with
 - Node.js 20+
 - PostgreSQL 15+, running locally
 - Rust (stable) — only needed to run the reconciler
-- The [`stellar` CLI](https://developers.stellar.org/docs/tools/cli/install-cli), on `PATH`, with a `deployer` identity configured (`stellar keys add deployer --secret-key ...`) — used for the on-chain compliance check, by both the API (`payments.service.ts`'s Freighter-path check) and the reconciler (the SEP-7/QR-path check, added after the fact — see [Compliance](#compliance) below). This was already an implicit requirement for running the API; it's stated explicitly here now that it's unavoidable for the reconciler too.
+- The [`stellar` CLI](https://developers.stellar.org/docs/tools/cli/install-cli), on `PATH`, with a `deployer` identity configured (`stellar keys add deployer --secret-key ...`) — needed by the reconciler's on-chain compliance check (`compliance.rs`, still CLI-shelled) and, locally only, as a convenience fallback if `STELLAR_DEPLOYER_SECRET_KEY` is unset (`x402.service.ts` resolves the facilitator's signing key via `stellar keys secret deployer` in that case). The API's own compliance checks (`payments.service.ts`, `x402.service.ts`) call the compliance contract directly over Soroban RPC — no CLI involved — see [Compliance](#compliance) below.
 - [Freighter](https://www.freighter.app/) browser extension, set to Testnet, for exercising checkout yourself
 
 ## Setup
@@ -286,8 +286,8 @@ diffing every table's row count against the original, not just checking that `pg
 
 `@nestjs/throttler`, global default of 60 req/min per IP per route. Tighter limits where it actually
 matters: `/auth/login` and `/auth/signup` at 10/min (brute-force/signup-spam resistance), and anything
-that calls an external service — `/payments/prepare-tx` (shells out to the `stellar` CLI *and* calls
-Horizon), the whole `/withdrawals` and `/deposits` controllers (call the anchor) — at 20/min, since
+that calls an external service — `/payments/prepare-tx` (calls the compliance contract over Soroban
+RPC *and* calls Horizon), the whole `/withdrawals` and `/deposits` controllers (call the anchor) — at 20/min, since
 those are slower and more expensive to abuse than a plain DB read. Status-polling endpoints
 (`/withdrawals/status`, `/deposits/status`) get their own 60/min headroom since the frontend polls them
 every 3 seconds for the duration of a cash-out or deposit, which would otherwise sit right at a tighter
@@ -295,7 +295,7 @@ limit's boundary.
 
 ## Timeouts & retries
 
-Every external call (Horizon, the `stellar` CLI compliance check, the anchor) has a real timeout —
+Every external call (Horizon, the compliance contract's RPC call, the anchor) has a real timeout —
 none of them could hang a request indefinitely before this. Retries are deliberately asymmetric, not
 uniform, based on what's actually safe to repeat:
 
@@ -305,7 +305,8 @@ uniform, based on what's actually safe to repeat:
 | Anchor `GET` calls (challenge, status) | Yes | Same — idempotent reads |
 | Anchor `POST /auth` (token exchange) | Once | Re-submitting the same signed challenge is safe |
 | Anchor `POST .../interactive` (start withdraw/deposit) | No | Creates a new transaction on the anchor's side every success — a lost response retried blindly risks an orphaned duplicate, not a fixed request |
-| Compliance CLI shell-out | Once | Already fails open on any failure; one retry catches a single blip before falling through |
+| Compliance contract RPC call (API) | Once | Already fails open on any failure; one retry catches a single blip before falling through |
+| Compliance CLI shell-out (reconciler only) | Once | Same reasoning — reconciler's `compliance.rs` still shells out to the `stellar` CLI |
 
 `fetchWithRetry` (`src/common/retry.ts`) only retries a transport-level failure or a 5xx — a 4xx means
 the same thing on every attempt, so it's returned immediately rather than wasting three attempts on a
@@ -319,9 +320,13 @@ documented above.
 ## Compliance
 
 Every payment is screened against the same deployed Soroban contract (`is_allowed`, contract id
-`CDDVLE2DZQAYFY3Z2Z74TUNNPC4ROUACSBXOB2P64IT75EZFAQXSRSXY`), invoked via the `stellar` CLI — but the
-two checkout paths screen at different points, because only one of them has a payer address to check
-before the money moves:
+`CDDVLE2DZQAYFY3Z2Z74TUNNPC4ROUACSBXOB2P64IT75EZFAQXSRSXY`) — the API (`payments.service.ts`,
+`x402.service.ts`) calls it directly over Soroban RPC via `src/common/onchain-compliance.ts`
+(`@stellar/stellar-sdk/contract`'s `Client`, simulate-only — `is_allowed` never mutates state, so no
+signing or submission is needed); the reconciler's `compliance.rs` still shells out to the `stellar`
+CLI, a real asymmetry between the two languages, not an oversight — see
+[Known limitations](#known-limitations). The two checkout paths screen at different points either way,
+because only one of them has a payer address to check before the money moves:
 
 - **Freighter checkout** (`payments.service.ts`'s `isPayerAllowed`) — before any transaction is built.
   Checks the local `blocked_addresses` table first (instant, fails closed on a hit), then the on-chain
@@ -362,7 +367,7 @@ one, not a generic template.
 - **Testnet only.** Mainnet needs a funded production USDC issuer, `JWT_SECRET` in a real secrets manager, and HTTPS in front of the session cookie.
 - **XLM and USDC only.** `EURC` is accepted by validation but not implemented in `prepareTx` or `buildPayUri`.
 - **SEP-7/QR compliance screening is after-the-fact, not preventive** — by the time the reconciler can check it, the payment has already landed on-chain. See [Compliance](#compliance) for the full design; this is an architectural ceiling of the SEP-7 flow itself, not something a code change on Konfirm's side can move earlier.
-- **Compliance check shells out to the `stellar` CLI** rather than calling Soroban RPC directly — reasonable for a pilot, a real follow-up before scale. Now a dependency of the reconciler too, not just the API.
+- **The reconciler's compliance check still shells out to the `stellar` CLI** — the API's own checks (`payments.service.ts`, `x402.service.ts`) call the contract directly over Soroban RPC now, but porting the same approach to the Rust reconciler (a different language, no equivalent high-level contract-client crate readily available) is a real follow-up, not done yet.
 - **The reconciler watches one merchant address per process.** Fine for a pilot; a real deployment needs either one process per merchant or a multi-account watch loop.
 - Fails open, loudly, if the compliance contract is unreachable (logged, never silent) — a deliberate choice, not an oversight.
 - **The compliance blocklist and reconciler rewind guard don't reach the SEP-7/QR checkout path or process-level coordination respectively** — see the [Admin](#admin) section above for exactly what each does and doesn't cover.
@@ -380,14 +385,19 @@ private networking:
 | `reconciler` | `reconciler/Dockerfile` | No | Watches Horizon, writes confirmed payments — `reconciler/railway.json`, restart-always |
 | backup cron | repo root, custom start command | No | Runs `db/scripts/backup.sh` on a schedule against the private `DATABASE_URL` — configured directly in the Railway dashboard as a Cron Job service, not a checked-in config file (a third service sharing the repo root can't share the default-discovered `railway.json` filename with `api`) |
 
-Both Dockerfiles build the `stellar` CLI from source (`cargo install --locked stellar-cli`) — it's a
-real dependency of both the API (Freighter-path compliance check) and the reconciler (the SEP-7-path
-check added in this session), not something either can run without. The `deployer` identity used
-locally throughout development doesn't exist in a container (registering one non-interactively isn't
-possible — confirmed by hand: the CLI's `--secret-key` flag requires a real TTY prompt, even a piped
-stdin doesn't satisfy it), so both `payments.service.ts` and `compliance.rs` pass the account via
-`--source-account`, using `STELLAR_DEPLOYER_SECRET_KEY` directly if set, falling back to the local
-`deployer` identity by name if not — one code path that's correct in both environments.
+Only `reconciler/Dockerfile` still builds the `stellar` CLI from source (`cargo install --locked
+stellar-cli`) — its compliance check (`compliance.rs`) shells out to it via `--source-account`, using
+`STELLAR_DEPLOYER_SECRET_KEY` directly if set, falling back to the local `deployer` identity by name if
+not. The root `Dockerfile` (the `api` service) no longer builds or ships the CLI at all: its compliance
+checks call the contract directly over Soroban RPC (see [Compliance](#compliance)), which also means
+the whole class of "compiled binary needs a runtime shared library the base image doesn't ship"
+failures this session hit (`libdbus-1.so.3`, `libssl.so.3`, missing `ca-certificates`) simply doesn't
+apply to `api` anymore — there's no separately-compiled binary to carry those dependencies. The
+`deployer` identity used locally throughout development still doesn't exist in a container (registering
+one non-interactively isn't possible — confirmed by hand: the CLI's `--secret-key` flag requires a real
+TTY prompt, even a piped stdin doesn't satisfy it); this only still matters for the reconciler and for
+`x402.service.ts`'s local-dev-only signing-key fallback, both of which fall back to
+`STELLAR_DEPLOYER_SECRET_KEY` when unset.
 
 The reconciler's `watch` used to exit after finding a single payment (a "demo" convenience) — that was
 removed once this was actually being deployed, since restarting the whole process after every payment

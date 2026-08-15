@@ -1,83 +1,26 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-import {
-  BASE_FEE,
-  Horizon,
-  Memo,
-  Networks,
-  Operation,
-  TransactionBuilder,
-} from '@stellar/stellar-sdk';
+import { BASE_FEE, Horizon, Memo, Networks, Operation, TransactionBuilder } from '@stellar/stellar-sdk';
 import { pool } from '../db/pool';
 import { resolveAsset } from '../common/asset';
 import { withRetry } from '../common/retry';
+import { isAllowedOnChain } from '../common/onchain-compliance';
 
-const execFileAsync = promisify(execFile);
 const HORIZON_URL = 'https://horizon-testnet.stellar.org';
-const COMPLIANCE_CONTRACT_ID = 'CDDVLE2DZQAYFY3Z2Z74TUNNPC4ROUACSBXOB2P64IT75EZFAQXSRSXY';
 
 @Injectable()
 export class PaymentsService {
   private horizon = new Horizon.Server(HORIZON_URL);
 
   // A local admin-managed block takes precedence and is checked first —
-  // instant, no subprocess, fails closed (unlike the chain check below,
-  // which fails open). Only covers this path: buildPayUri() (SEP-7/QR) has
-  // no payer address at request time and remains unscreened either way —
-  // an inherited gap, not something this check silently fixes or worsens.
+  // instant, no RPC round trip, fails closed (unlike the chain check
+  // below, which fails open). Only covers this path: buildPayUri()
+  // (SEP-7/QR) has no payer address at request time and remains
+  // unscreened either way — an inherited gap, not something this check
+  // silently fixes or worsens.
   private async isPayerAllowed(address: string): Promise<boolean> {
     const { rows } = await pool.query('SELECT 1 FROM blocked_addresses WHERE stellar_address = $1', [address]);
     if (rows.length > 0) return false;
-    return this.isAllowedOnChain(address);
-  }
-
-  // Calling the deployed contract via the `stellar` CLI rather than
-  // hand-rolling a Soroban RPC client call — for a pilot this is a
-  // reasonable, low-risk choice; swapping to a direct rpc.Server call is a
-  // real follow-up, not a correctness gap in what this returns today.
-  private async isAllowedOnChain(address: string): Promise<boolean> {
-    try {
-      // A native execFile timeout really kills the child process (unlike a
-      // Promise-based race, which would just stop waiting on it) — paired
-      // with one retry for a single transient blip before falling through
-      // to the documented fail-open behavior below.
-      const { stdout } = await withRetry(
-        () =>
-          execFileAsync(
-            'stellar',
-            [
-              'contract',
-              'invoke',
-              '--id',
-              COMPLIANCE_CONTRACT_ID,
-              // A raw secret key in production (STELLAR_DEPLOYER_SECRET_KEY,
-              // set as a deploy-time env var — no interactive `stellar keys
-              // add` step is possible in a container), or the locally
-              // pre-registered 'deployer' identity in dev. One code path
-              // handles both correctly.
-              '--source-account',
-              process.env.STELLAR_DEPLOYER_SECRET_KEY ?? 'deployer',
-              '--network',
-              'testnet',
-              '--',
-              'is_allowed',
-              '--addr',
-              address,
-            ],
-            { timeout: 8_000 },
-          ),
-        { retries: 1, baseDelayMs: 500, timeoutMs: 9_000 },
-      );
-      return stdout.trim() === 'true';
-    } catch (err) {
-      // Fail open, loudly — matches the documented invariant: an
-      // unreachable compliance check must never silently block checkout,
-      // but it must never be silent about it either.
-      // eslint-disable-next-line no-console
-      console.warn('[compliance] on-chain check unreachable, failing open:', err);
-      return true;
-    }
+    return isAllowedOnChain(address);
   }
 
   // Shared by both signing paths (Freighter's prepared-XDR flow and the QR

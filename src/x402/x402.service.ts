@@ -7,10 +7,9 @@ import { createEd25519Signer, USDC_TESTNET_ADDRESS, STELLAR_TESTNET_CAIP2, DEFAU
 import { ExactStellarScheme } from '@x402/stellar/exact/facilitator';
 import type { PaymentPayload, PaymentRequirements, SettleResponse, SupportedResponse, VerifyResponse } from './x402.types';
 import { pool } from '../db/pool';
-import { withRetry } from '../common/retry';
+import { isAllowedOnChain } from '../common/onchain-compliance';
 
 const execFileAsync = promisify(execFile);
-const COMPLIANCE_CONTRACT_ID = 'CDDVLE2DZQAYFY3Z2Z74TUNNPC4ROUACSBXOB2P64IT75EZFAQXSRSXY';
 
 @Injectable()
 export class X402Service implements OnModuleInit {
@@ -58,51 +57,17 @@ export class X402Service implements OnModuleInit {
     return stdout.trim();
   }
 
-  // Identical local-blocklist-then-on-chain-contract pattern as
+  // Same local-blocklist-then-on-chain-contract pattern as
   // payments.service.ts's isPayerAllowed — now protecting a third payment
   // path (Freighter checkout, the reconciler's after-the-fact SEP-7
-  // screening, and this inline x402 verification). Duplicated rather than
-  // extracted into a shared module: payments.service.ts keeps it private,
-  // and this is the smallest change that doesn't touch already-shipped,
-  // already-deployed code to add an export.
+  // screening, and this inline x402 verification). The on-chain half is
+  // now a shared module (src/common/onchain-compliance.ts) rather than
+  // duplicated CLI-shell code — both call sites moved off the `stellar`
+  // CLI to a direct Soroban RPC call together.
   private async isPayerAllowed(address: string): Promise<boolean> {
     const { rows } = await pool.query('SELECT 1 FROM blocked_addresses WHERE stellar_address = $1', [address]);
     if (rows.length > 0) return false;
-    return this.isAllowedOnChain(address);
-  }
-
-  private async isAllowedOnChain(address: string): Promise<boolean> {
-    try {
-      const { stdout } = await withRetry(
-        () =>
-          execFileAsync(
-            'stellar',
-            [
-              'contract',
-              'invoke',
-              '--id',
-              COMPLIANCE_CONTRACT_ID,
-              '--source-account',
-              process.env.STELLAR_DEPLOYER_SECRET_KEY ?? 'deployer',
-              '--network',
-              'testnet',
-              '--',
-              'is_allowed',
-              '--addr',
-              address,
-            ],
-            { timeout: 8_000 },
-          ),
-        { retries: 1, baseDelayMs: 500, timeoutMs: 9_000 },
-      );
-      return stdout.trim() === 'true';
-    } catch (err) {
-      // Fail open, loudly — same documented invariant as payments.service.ts:
-      // an unreachable compliance check must never silently block a
-      // settlement, but it must never be silent about it either.
-      this.logger.warn(`on-chain compliance check unreachable, failing open: ${err}`);
-      return true;
-    }
+    return isAllowedOnChain(address);
   }
 
   // Deterministic per-signed-payload key: hashing the base64 transaction
