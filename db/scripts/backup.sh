@@ -4,7 +4,13 @@
 set -euo pipefail
 
 DB_NAME="${1:-konfirm_dev}"
-BACKUP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../backups" && pwd)"
+# Resolve the parent (db/) directory first, since it's guaranteed to exist
+# (this script lives inside it) — then append backups/ as a plain string.
+# Doing this in one step via `cd .../backups && pwd` requires backups/ to
+# already exist, which it won't on a fresh container that only copies this
+# script in, not the whole db/ tree; mkdir -p below only runs after this
+# line, so that ordering would always fail there.
+BACKUP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/backups"
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT_FILE="$BACKUP_DIR/${DB_NAME}_${TIMESTAMP}.dump"
 
