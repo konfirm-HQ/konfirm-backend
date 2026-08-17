@@ -39,4 +39,17 @@ fi
 # substitute for offsite storage, just bounds local disk usage for
 # day-to-day dev use. Pruning only ever happens after the upload above, so
 # nothing is deleted locally before it's shipped off-machine.
-ls -1t "$BACKUP_DIR"/"${DB_NAME}"_*.dump 2>/dev/null | tail -n +15 | xargs rm --
+#
+# Guarded with a non-empty check rather than piping straight into xargs:
+# with fewer than 15 backups present (the normal case on a fresh
+# container, which starts with none — this only ever accumulates history
+# on a persistent volume, not backup-cron's stateless one), `tail -n +15`
+# produces no output, and xargs's default behavior on empty input still
+# runs the command once with zero arguments ("rm --" with no operand
+# fails). GNU xargs has -r/--no-run-if-empty for this, but this script
+# also runs locally on macOS's BSD xargs, which doesn't support that flag
+# — checking non-emptiness first works identically on both.
+OLD_BACKUPS="$(ls -1t "$BACKUP_DIR"/"${DB_NAME}"_*.dump 2>/dev/null | tail -n +15)"
+if [ -n "$OLD_BACKUPS" ]; then
+  echo "$OLD_BACKUPS" | xargs rm --
+fi
