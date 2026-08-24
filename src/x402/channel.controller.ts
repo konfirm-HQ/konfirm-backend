@@ -15,6 +15,17 @@ const claimSchema = z.object({
   signature: z.string().regex(/^[0-9a-fA-F]{128}$/, 'must be a 64-byte hex-encoded ed25519 signature'),
 });
 
+// The payer builds and signs the open_channel invocation entirely
+// client-side (their own auth entry embedded, nothing submitted yet) and
+// hands the facilitator the resulting transaction XDR to countersign as
+// fee-sponsoring source and submit — everything else (payee, token,
+// deposit) is extracted from the signed transaction itself, not repeated
+// here, so there's nothing for the two to disagree about.
+const openSchema = z.object({
+  transaction: z.string().min(1),
+  resource_url: z.string().url().optional(),
+});
+
 // Same no-AuthGuard reasoning as x402.controller.ts — called by parties
 // with no prior relationship to Konfirm. Sits at the same 20/60s tier as
 // /x402/verify+/settle for /open (a real Soroban submission), but /claim
@@ -38,5 +49,15 @@ export class ChannelController {
       throw new BadRequestException(result.reason ?? 'claim_rejected');
     }
     return { accepted: true };
+  }
+
+  @Post('open')
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  async open(@Body(new ZodValidationPipe(openSchema)) body: z.infer<typeof openSchema>) {
+    const result = await this.channel.openChannel({ transactionXdr: body.transaction, resourceUrl: body.resource_url });
+    if (!result.success) {
+      throw new BadRequestException(result.errorReason ?? 'open_failed');
+    }
+    return { success: true, channel_id: result.onchainChannelId, transaction: result.transaction };
   }
 }
