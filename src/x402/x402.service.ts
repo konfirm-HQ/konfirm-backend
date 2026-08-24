@@ -1,15 +1,12 @@
 /// <reference path="./x402-stellar-facilitator.d.ts" />
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
-import { createEd25519Signer, USDC_TESTNET_ADDRESS, STELLAR_TESTNET_CAIP2, DEFAULT_TESTNET_RPC_URL } from '@x402/stellar';
+import { USDC_TESTNET_ADDRESS, STELLAR_TESTNET_CAIP2, DEFAULT_TESTNET_RPC_URL } from '@x402/stellar';
 import { ExactStellarScheme } from '@x402/stellar/exact/facilitator';
 import type { PaymentPayload, PaymentRequirements, SettleResponse, SupportedResponse, VerifyResponse } from './x402.types';
 import { pool } from '../db/pool';
 import { isAllowedOnChain } from '../common/onchain-compliance';
-
-const execFileAsync = promisify(execFile);
+import { getFacilitatorSigner } from '../common/facilitator-signer';
 
 @Injectable()
 export class X402Service implements OnModuleInit {
@@ -18,10 +15,11 @@ export class X402Service implements OnModuleInit {
 
   // Constructed once at startup, not per-request — ExactStellarScheme signs
   // in-process with real key material (unlike the CLI-shelled compliance
-  // check below), so the signer only needs to be resolved once.
+  // check below), so the signer only needs to be resolved once. The signer
+  // itself is shared with ChannelService via getFacilitatorSigner() — same
+  // identity, same key, one resolution.
   async onModuleInit() {
-    const secretKey = await this.resolveDeployerSecretKey();
-    const signer = createEd25519Signer(secretKey, STELLAR_TESTNET_CAIP2);
+    const signer = await getFacilitatorSigner();
     this.scheme = new ExactStellarScheme([signer], {
       rpcConfig: { url: DEFAULT_TESTNET_RPC_URL },
     });
@@ -40,21 +38,6 @@ export class X402Service implements OnModuleInit {
       ],
       extensions: [],
     };
-  }
-
-  // Same identity resolution as payments.service.ts/compliance.rs: a raw
-  // secret key in production (STELLAR_DEPLOYER_SECRET_KEY, set as a
-  // deploy-time env var — no interactive `stellar keys add` is possible in
-  // a container), or the locally pre-registered 'deployer' identity in dev.
-  // Unlike the CLI-shelled compliance check, createEd25519Signer needs real
-  // key material up front rather than an identity name it can resolve
-  // itself, so the local-dev fallback shells out once to `stellar keys
-  // secret` to get the actual secret.
-  private async resolveDeployerSecretKey(): Promise<string> {
-    const fromEnv = process.env.STELLAR_DEPLOYER_SECRET_KEY;
-    if (fromEnv) return fromEnv;
-    const { stdout } = await execFileAsync('stellar', ['keys', 'secret', 'deployer']);
-    return stdout.trim();
   }
 
   // Same local-blocklist-then-on-chain-contract pattern as
