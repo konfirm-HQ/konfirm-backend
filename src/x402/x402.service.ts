@@ -93,14 +93,30 @@ export class X402Service implements OnModuleInit {
     }
   }
 
-  // v1 scope guard, checked before the package is ever called — one
-  // scheme, one network, one asset, per this facilitator's deliberately
-  // narrow launch scope.
+  // Allowlist of supported SEP-41 SAC contract addresses. Configurable via
+  // X402_ALLOWED_ASSETS (comma-separated list of contract addresses),
+  // defaulting to USDC testnet address if unset or empty.
+  private getAllowedAssets(): Set<string> {
+    const raw = process.env.X402_ALLOWED_ASSETS;
+    if (raw) {
+      const addresses = raw
+        .split(',')
+        .map((a) => a.trim())
+        .filter(Boolean);
+      if (addresses.length > 0) {
+        return new Set(addresses);
+      }
+    }
+    return new Set([USDC_TESTNET_ADDRESS]);
+  }
+
+  // Scope guard, checked before the package is ever called —
+  // scheme, network, and asset allowlist.
   private outOfScopeReason(x402Version: number, requirements: PaymentRequirements): string | null {
     if (x402Version !== 2) return 'unsupported_x402_version';
     if (requirements.scheme !== 'exact') return 'unsupported_scheme';
     if (requirements.network !== STELLAR_TESTNET_CAIP2) return 'unsupported_network';
-    if (requirements.asset !== USDC_TESTNET_ADDRESS) return 'unsupported_asset';
+    if (!this.getAllowedAssets().has(requirements.asset)) return 'unsupported_asset';
     return null;
   }
 
