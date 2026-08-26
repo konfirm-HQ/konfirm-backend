@@ -122,6 +122,7 @@ impl Store {
         asset_code: &str,
         asset_issuer: Option<&str>,
         amount: &str,
+        fx_rate_to_usd: Option<Decimal>,
         paging_token: &str,
         tx_hash: &str,
     ) -> Result<Option<RecordedPayment>> {
@@ -153,11 +154,11 @@ impl Store {
         let inserted: Option<(Uuid,)> = sqlx::query_as(
             "INSERT INTO payments
                 (merchant_id, link_id, muxed_id, muxed_address, payer_address,
-                 asset_code, asset_issuer, amount_usdc, fee_usdc, net_usdc,
+                 asset_code, asset_issuer, amount_usdc, fee_usdc, net_usdc, fx_rate_to_usd,
                  channel, status, paging_token, tx_hash, ledger_sequence)
              VALUES
-                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                 'hosted_checkout', $11, $12, $13, $14)
+                ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                 'hosted_checkout', $12, $13, $14, $15)
              ON CONFLICT (paging_token) DO NOTHING
              RETURNING id",
         )
@@ -171,6 +172,7 @@ impl Store {
         .bind(gross)
         .bind(fee)
         .bind(net)
+        .bind(fx_rate_to_usd)
         .bind(status)
         .bind(paging_token)
         .bind(tx_hash)

@@ -290,6 +290,43 @@ describe('admin workflow: suspend/reactivate a merchant (e2e)', () => {
     });
   });
 
+  describe('exchange rate: live rate reachable, and applied conversions are auditable', () => {
+    const xrPayer = `G${'EXCHANGERATETEST'.padEnd(55, 'A')}`;
+
+    beforeAll(async () => {
+      // A real signed XLM transaction through the actual reconciler isn't
+      // practical in this e2e context — this inserts the row the way the
+      // fixed reconciler now would (a real fx_rate_to_usd captured
+      // alongside the converted amount), to prove the READ side (the admin
+      // endpoint) surfaces it correctly. The WRITE side (the conversion
+      // itself) has its own real-testnet-verified test in
+      // reconciler/src/horizon.rs.
+      await pool.query(
+        `INSERT INTO payments (merchant_id, muxed_id, muxed_address, payer_address, asset_code, amount_usdc, fx_rate_to_usd, net_usdc, status, paging_token, tx_hash, ledger_sequence)
+         VALUES ($1, 113, 'M...xr1', $2, 'XLM', 2.73, 0.273, 2.73, 'paid', $3, 'e2e-xr-tx-1', 1)`,
+        [merchantId, xrPayer, `e2e-xr-paging-${Date.now()}`],
+      );
+    });
+
+    afterAll(async () => {
+      await pool.query('DELETE FROM payments WHERE payer_address = $1', [xrPayer]);
+    });
+
+    it('live rate endpoint reaches real testnet Horizon and returns a positive rate', async () => {
+      const res = await request(app.getHttpServer()).get('/admin/exchange-rate/live').set('Cookie', adminCookie).expect(200);
+      expect(res.body.reachable).toBe(true);
+      expect(Number(res.body.rate)).toBeGreaterThan(0);
+    });
+
+    it('recent conversions includes the XLM payment with its applied rate, not a USDC payment', async () => {
+      const res = await request(app.getHttpServer()).get('/admin/exchange-rate/conversions').set('Cookie', adminCookie).expect(200);
+      const row = res.body.find((c: { payer_address: string }) => c.payer_address === xrPayer);
+      expect(row).toBeDefined();
+      expect(row.asset_code).toBe('XLM');
+      expect(Number(row.fx_rate_to_usd)).toBeCloseTo(0.273, 5);
+    });
+  });
+
   describe('merchant tier: admin can change it, identity verification is not implied', () => {
     it('rejects an invalid tier value outright', async () => {
       await request(app.getHttpServer())

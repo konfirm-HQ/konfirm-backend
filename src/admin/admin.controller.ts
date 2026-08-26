@@ -17,6 +17,7 @@ import { AdminTreasuryService } from './admin-treasury.service';
 import { AdminFeeRevenueService } from './admin-fee-revenue.service';
 import { AdminUsersService } from './admin-users.service';
 import { AdminWalletsService } from './admin-wallets.service';
+import { AdminExchangeRateService } from './admin-exchange-rate.service';
 
 const setMerchantStatusSchema = z.object({
   status: z.enum(['active', 'suspended']),
@@ -66,6 +67,7 @@ export class AdminController {
     private readonly feeRevenue: AdminFeeRevenueService,
     private readonly users: AdminUsersService,
     private readonly wallets: AdminWalletsService,
+    private readonly exchangeRate: AdminExchangeRateService,
   ) {}
 
   @Get('stats')
@@ -241,6 +243,18 @@ export class AdminController {
   @Get('wallets')
   listWallets(@Query('limit') limit?: string, @Query('offset') offset?: string) {
     return this.wallets.list(limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
+  }
+
+  // --- Exchange rate ---
+
+  @Get('exchange-rate/live')
+  getLiveExchangeRate() {
+    return this.exchangeRate.liveXlmUsdcRate();
+  }
+
+  @Get('exchange-rate/conversions')
+  listExchangeRateConversions(@Query('limit') limit?: string) {
+    return this.exchangeRate.recentConversions(limit ? Number(limit) : undefined);
   }
 
   // Surfaced back to the admin UI as a recent-activity feed rather than

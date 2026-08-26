@@ -151,19 +151,24 @@ async fn watch(merchant_address: &str, max_polls: u32, interval_secs: u64) -> Re
             // current XLM/USD levels) every XLM-denominated payment's real
             // dollar value — found while building an admin Exchange Rate
             // view on top of what turned out to be already-wrong numbers.
-            let usd_amount: String = if asset_code == "XLM" {
-                let rate = match xlm_usdc_rate {
+            let applied_rate: Option<rust_decimal::Decimal> = if asset_code == "XLM" {
+                Some(match xlm_usdc_rate {
                     Some(r) => r,
                     None => {
                         let r = horizon.xlm_usdc_rate(USDC_TESTNET_ISSUER).await?;
                         xlm_usdc_rate = Some(r);
                         r
                     }
-                };
-                let raw: rust_decimal::Decimal = raw_amount.parse().context("horizon returned a non-decimal XLM amount")?;
-                (raw * rate).to_string()
+                })
             } else {
-                raw_amount.to_string()
+                None
+            };
+            let usd_amount: String = match applied_rate {
+                Some(rate) => {
+                    let raw: rust_decimal::Decimal = raw_amount.parse().context("horizon returned a non-decimal XLM amount")?;
+                    (raw * rate).to_string()
+                }
+                None => raw_amount.to_string(),
             };
 
             let recorded = store
@@ -175,6 +180,7 @@ async fn watch(merchant_address: &str, max_polls: u32, interval_secs: u64) -> Re
                     &asset_code,
                     asset_issuer.as_deref(),
                     &usd_amount,
+                    applied_rate,
                     &op.paging_token,
                     &op.transaction_hash,
                 )
