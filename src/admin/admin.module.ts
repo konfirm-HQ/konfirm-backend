@@ -10,6 +10,12 @@ import { AdminComplianceService } from './admin-compliance.service';
 import { AdminReconcilerService } from './admin-reconciler.service';
 import { AdminWithdrawalAttemptsService } from './admin-withdrawal-attempts.service';
 import { AdminX402SettlementsService } from './admin-x402-settlements.service';
+import { AdminLinksService } from './admin-links.service';
+import { AdminBlockchainService } from './admin-blockchain.service';
+import { AdminNotificationsService } from './admin-notifications.service';
+import { AdminTreasuryService } from './admin-treasury.service';
+import { AdminFeeRevenueService } from './admin-fee-revenue.service';
+import { AdminUsersService } from './admin-users.service';
 
 @Module({
   imports: [AdminAuthModule, WithdrawalsModule],
@@ -23,6 +29,12 @@ import { AdminX402SettlementsService } from './admin-x402-settlements.service';
     AdminReconcilerService,
     AdminWithdrawalAttemptsService,
     AdminX402SettlementsService,
+    AdminLinksService,
+    AdminBlockchainService,
+    AdminNotificationsService,
+    AdminTreasuryService,
+    AdminFeeRevenueService,
+    AdminUsersService,
   ],
 })
 export class AdminModule {}

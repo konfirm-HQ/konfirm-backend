@@ -10,6 +10,12 @@ import { AdminComplianceService } from './admin-compliance.service';
 import { AdminReconcilerService } from './admin-reconciler.service';
 import { AdminWithdrawalAttemptsService } from './admin-withdrawal-attempts.service';
 import { AdminX402SettlementsService } from './admin-x402-settlements.service';
+import { AdminLinksService } from './admin-links.service';
+import { AdminBlockchainService } from './admin-blockchain.service';
+import { AdminNotificationsService } from './admin-notifications.service';
+import { AdminTreasuryService } from './admin-treasury.service';
+import { AdminFeeRevenueService } from './admin-fee-revenue.service';
+import { AdminUsersService } from './admin-users.service';
 
 const setMerchantStatusSchema = z.object({
   status: z.enum(['active', 'suspended']),
@@ -47,6 +53,12 @@ export class AdminController {
     private readonly reconciler: AdminReconcilerService,
     private readonly withdrawalAttempts: AdminWithdrawalAttemptsService,
     private readonly x402Settlements: AdminX402SettlementsService,
+    private readonly links: AdminLinksService,
+    private readonly blockchain: AdminBlockchainService,
+    private readonly notifications: AdminNotificationsService,
+    private readonly treasury: AdminTreasuryService,
+    private readonly feeRevenue: AdminFeeRevenueService,
+    private readonly users: AdminUsersService,
   ) {}
 
   @Get('stats')
@@ -150,6 +162,55 @@ export class AdminController {
   @Get('x402-settlements')
   listX402Settlements(@Query('status') status?: string, @Query('limit') limit?: string, @Query('offset') offset?: string) {
     return this.x402Settlements.list(status, limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
+  }
+
+  // --- Pay links ---
+
+  @Get('links')
+  listLinks(@Query('limit') limit?: string, @Query('offset') offset?: string) {
+    return this.links.list(limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
+  }
+
+  // --- Blockchain status ---
+
+  @Get('blockchain/status')
+  getBlockchainStatus() {
+    return this.blockchain.status();
+  }
+
+  // --- Notifications ---
+
+  @Get('notifications')
+  listNotifications(@Query('limit') limit?: string) {
+    return this.notifications.list(limit ? Number(limit) : undefined);
+  }
+
+  // --- Treasury ---
+
+  @Get('treasury/status')
+  getTreasuryStatus() {
+    return this.treasury.status();
+  }
+
+  // --- Fee revenue ---
+
+  @Get('fee-revenue/summary')
+  getFeeRevenueSummary() {
+    return this.feeRevenue.summary();
+  }
+
+  @Get('fee-revenue/daily')
+  getFeeRevenueDaily(@Query('days') days?: string) {
+    return this.feeRevenue.daily(days ? Number(days) : undefined);
+  }
+
+  // --- Users ---
+  // Every unique payments.payer_address, not a dedicated user account —
+  // see AdminUsersService's comment for why that's the honest framing.
+
+  @Get('users')
+  listUsers(@Query('limit') limit?: string, @Query('offset') offset?: string) {
+    return this.users.list(limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
   }
 
   // Surfaced back to the admin UI as a recent-activity feed rather than
