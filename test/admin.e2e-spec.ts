@@ -350,6 +350,93 @@ describe('admin workflow: suspend/reactivate a merchant (e2e)', () => {
     });
   });
 
+  describe('referrals: attribution at signup, activation computed from real payment history', () => {
+    const referrerEmail = `referrer-e2e-${Date.now()}@example.com`;
+    const referredEmail = `referred-e2e-${Date.now()}@example.com`;
+    const noCodeEmail = `no-code-e2e-${Date.now()}@example.com`;
+    const stellarAddr = 'GBXBABMFZIJPTOFI6STUXA2FMEXDBB4URBD3VS5XDHKMFHGLJZ5WPQBB';
+    let referrerId: string;
+    let referrerCode: string;
+    let referrerCookie: string;
+    let referredId: string;
+
+    afterAll(async () => {
+      await pool.query('DELETE FROM referrals WHERE referrer_id = $1 OR referred_id = $1', [referrerId]);
+      await pool.query('DELETE FROM payments WHERE merchant_id = $1', [referredId]);
+      await pool.query('DELETE FROM merchants WHERE email IN ($1, $2, $3)', [referrerEmail, referredEmail, noCodeEmail]);
+    });
+
+    it('every new merchant gets a referral code automatically, no separate step', async () => {
+      const res = await request(app.getHttpServer())
+        .post('/auth/signup')
+        .send({ email: referrerEmail, password: 'a-real-password-000', name: 'Referrer', stellar_base_address: stellarAddr })
+        .expect(201);
+      referrerId = res.body.merchant.id;
+      referrerCookie = res.headers['set-cookie'][0].split(';')[0];
+
+      const { rows } = await pool.query('SELECT referral_code FROM merchants WHERE id = $1', [referrerId]);
+      expect(rows[0].referral_code).toMatch(/^[A-Z2-9]{8}$/);
+      referrerCode = rows[0].referral_code;
+    });
+
+    it('an invalid referral code does not block signup, and creates no attribution', async () => {
+      await request(app.getHttpServer())
+        .post('/auth/signup')
+        .send({
+          email: noCodeEmail,
+          password: 'a-real-password-000',
+          name: 'No Code',
+          stellar_base_address: stellarAddr,
+          referral_code: 'NOTAREALCODE',
+        })
+        .expect(201);
+
+      const { rows } = await pool.query(
+        `SELECT 1 FROM referrals r JOIN merchants m ON m.id = r.referred_id WHERE m.email = $1`,
+        [noCodeEmail],
+      );
+      expect(rows.length).toBe(0);
+    });
+
+    it('signing up with a real referral code attributes the new merchant to the referrer', async () => {
+      const res = await request(app.getHttpServer())
+        .post('/auth/signup')
+        .send({
+          email: referredEmail,
+          password: 'a-real-password-000',
+          name: 'Referred Merchant',
+          stellar_base_address: stellarAddr,
+          referral_code: referrerCode,
+        })
+        .expect(201);
+      referredId = res.body.merchant.id;
+
+      const mine = await request(app.getHttpServer()).get('/auth/me/referrals').set('Cookie', referrerCookie).expect(200);
+      expect(mine.body.code).toBe(referrerCode);
+      const row = mine.body.referrals.find((r: { email: string }) => r.email === referredEmail);
+      expect(row).toBeDefined();
+      expect(row.activated).toBe(false);
+    });
+
+    it('activation flips to true once the referred merchant has a real paid payment, with no write-time hook', async () => {
+      await pool.query(
+        `INSERT INTO payments (merchant_id, muxed_id, muxed_address, payer_address, asset_code, amount_usdc, net_usdc, status, paging_token, tx_hash, ledger_sequence)
+         VALUES ($1, 114, 'M...ref1', $2, 'USDC', 5, 5, 'paid', $3, 'e2e-referral-tx', 1)`,
+        [referredId, 'GDIET4T37N35XU4FY52RMR4Z653WYFITEHGIJXN4VEQTDYR5JSURJDPL', `e2e-referral-paging-${Date.now()}`],
+      );
+
+      const mine = await request(app.getHttpServer()).get('/auth/me/referrals').set('Cookie', referrerCookie).expect(200);
+      const row = mine.body.referrals.find((r: { email: string }) => r.email === referredEmail);
+      expect(row.activated).toBe(true);
+
+      const admin = await request(app.getHttpServer()).get('/admin/referrals').set('Cookie', adminCookie).expect(200);
+      const adminRow = admin.body.find((r: { referred_email: string }) => r.referred_email === referredEmail);
+      expect(adminRow).toBeDefined();
+      expect(adminRow.activated).toBe(true);
+      expect(adminRow.referrer_email).toBe(referrerEmail);
+    });
+  });
+
   describe('reconciler: cursor can only move backward', () => {
     let originalCursor: string;
 

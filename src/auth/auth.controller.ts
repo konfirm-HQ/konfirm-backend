@@ -18,6 +18,10 @@ const signupSchema = z.object({
   // malformed address fails loudly the first time a payout is attempted,
   // which is an acceptable place for that error to surface for a pilot.
   stellar_base_address: z.string().regex(/^G[A-Z2-7]{55}$/, 'must be a valid Stellar G... address'),
+  // Optional -- an invalid/mistyped code never blocks signup, see
+  // AuthService.signup(). Loosely validated here only to reject obviously
+  // malformed input before it reaches a query.
+  referral_code: z.string().max(20).optional(),
 });
 
 const loginSchema = z.object({
@@ -38,7 +42,13 @@ export class AuthController {
     @Body(new ZodValidationPipe(signupSchema)) body: z.infer<typeof signupSchema>,
     @Res({ passthrough: true }) res: Response,
   ) {
-    const { token, merchant } = await this.auth.signup(body.email, body.password, body.name, body.stellar_base_address);
+    const { token, merchant } = await this.auth.signup(
+      body.email,
+      body.password,
+      body.name,
+      body.stellar_base_address,
+      body.referral_code,
+    );
     this.setSessionCookie(res, token);
     return { merchant };
   }
@@ -66,6 +76,12 @@ export class AuthController {
   @UseGuards(AuthGuard)
   me(@Req() req: AuthedRequest) {
     return { merchant: req.merchant };
+  }
+
+  @Get('me/referrals')
+  @UseGuards(AuthGuard)
+  myReferrals(@Req() req: AuthedRequest) {
+    return this.auth.myReferrals(req.merchant.id);
   }
 
   private setSessionCookie(res: Response, token: string) {
