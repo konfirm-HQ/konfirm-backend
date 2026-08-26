@@ -1,9 +1,27 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Address, BASE_FEE, Networks, Transaction, TransactionBuilder, Operation, scValToNative, rpc } from '@stellar/stellar-sdk';
+import {
+  Address,
+  BASE_FEE,
+  Contract,
+  Networks,
+  Transaction,
+  TransactionBuilder,
+  Operation,
+  nativeToScVal,
+  scValToNative,
+  rpc,
+} from '@stellar/stellar-sdk';
 import { pool } from '../db/pool';
 import { verifyClaimSignature } from '../common/channel-claim';
 import { getFacilitatorSigner } from '../common/facilitator-signer';
 import { isAllowedOnChain } from '../common/onchain-compliance';
+
+export interface FacilitatorCallResult {
+  success: boolean;
+  transaction?: string;
+  returnValue?: unknown;
+  errorReason?: string;
+}
 
 export interface ClaimResult {
   accepted: boolean;
@@ -13,6 +31,12 @@ export interface ClaimResult {
 export interface OpenChannelResult {
   success: boolean;
   onchainChannelId?: string;
+  transaction?: string;
+  errorReason?: string;
+}
+
+export interface CloseChannelResult {
+  success: boolean;
   transaction?: string;
   errorReason?: string;
 }
@@ -218,6 +242,227 @@ export class ChannelService {
     );
 
     return { success: true, onchainChannelId, transaction: sentHash };
+  }
+
+  // Same client-signs-facilitator-submits pattern as openChannel — either
+  // party (payer or payee) can request a close, so either can be the
+  // signer. The contract itself is the real enforcement of "caller must be
+  // payer or payee" (initiate_close's own require_auth() + check); the
+  // channel_id/caller extraction below exists to give a clean error and
+  // skip a wasted simulation for an obviously-wrong call, not to duplicate
+  // that enforcement.
+  async closeChannel(params: { transactionXdr: string }): Promise<CloseChannelResult> {
+    const server = new rpc.Server(RPC_URL);
+    let transaction: Transaction;
+    try {
+      transaction = new Transaction(params.transactionXdr, Networks.TESTNET);
+    } catch {
+      return { success: false, errorReason: 'malformed_transaction' };
+    }
+
+    if (transaction.operations.length !== 1) {
+      return { success: false, errorReason: 'wrong_operation_count' };
+    }
+    const operation = transaction.operations[0];
+    if (operation.type !== 'invokeHostFunction') {
+      return { success: false, errorReason: 'wrong_operation_type' };
+    }
+
+    const signer = await getFacilitatorSigner();
+    if ((operation.source ?? transaction.source) === signer.address) {
+      return { success: false, errorReason: 'unsafe_tx_source' };
+    }
+
+    const func = operation.func;
+    if (!func || func.switch().name !== 'hostFunctionTypeInvokeContract') {
+      return { success: false, errorReason: 'wrong_operation_type' };
+    }
+    const invokeArgs = func.invokeContract();
+    const contractAddress = Address.fromScAddress(invokeArgs.contractAddress()).toString();
+    const functionName = invokeArgs.functionName().toString();
+    const args = invokeArgs.args();
+    if (contractAddress !== CHANNEL_CONTRACT_ID) {
+      return { success: false, errorReason: 'wrong_contract' };
+    }
+    if (functionName !== 'initiate_close' || args.length !== 2) {
+      return { success: false, errorReason: 'wrong_function' };
+    }
+
+    const caller = scValToNative(args[0]) as string;
+    const onchainChannelId = (scValToNative(args[1]) as bigint).toString();
+
+    const { rows } = await pool.query(
+      `SELECT payer_address, payee_address, status FROM x402_channels WHERE onchain_channel_id = $1`,
+      [onchainChannelId],
+    );
+    if (rows.length === 0) {
+      return { success: false, errorReason: 'channel_not_found' };
+    }
+    const row = rows[0] as { payer_address: string; payee_address: string; status: string };
+    if (caller !== row.payer_address && caller !== row.payee_address) {
+      return { success: false, errorReason: 'caller_not_a_party' };
+    }
+    if (row.status !== 'open') {
+      return { success: false, errorReason: 'channel_not_open' };
+    }
+
+    let simResponse: rpc.Api.SimulateTransactionResponse;
+    try {
+      simResponse = await server.simulateTransaction(transaction);
+    } catch (err) {
+      this.logger.error(`initiate_close simulation failed: ${err}`);
+      return { success: false, errorReason: 'simulation_failed' };
+    }
+    if (!rpc.Api.isSimulationSuccess(simResponse)) {
+      return { success: false, errorReason: 'simulation_failed' };
+    }
+
+    let sentHash: string;
+    try {
+      const facilitatorAccount = await server.getAccount(signer.address);
+      const sorobanData = simResponse.transactionData.build();
+      const rebuiltTx = new TransactionBuilder(facilitatorAccount, {
+        fee: BASE_FEE,
+        networkPassphrase: Networks.TESTNET,
+        sorobanData,
+      })
+        .setTimeout(60)
+        .addOperation(Operation.invokeHostFunction(operation))
+        .build();
+
+      const { signedTxXdr, error: signError } = await signer.signTransaction(rebuiltTx.toXDR(), {
+        networkPassphrase: Networks.TESTNET,
+      });
+      if (signError || !signedTxXdr) {
+        return { success: false, errorReason: 'signing_failed' };
+      }
+
+      const txToSubmit = TransactionBuilder.fromXDR(signedTxXdr, Networks.TESTNET);
+      const sendResult = await server.sendTransaction(txToSubmit);
+      if (sendResult.status !== 'PENDING') {
+        return { success: false, errorReason: 'submission_failed' };
+      }
+      sentHash = sendResult.hash;
+    } catch (err) {
+      this.logger.error(`initiate_close submission failed: ${err}`);
+      return { success: false, errorReason: 'submission_failed' };
+    }
+
+    const confirmed = await this.pollForTransaction(server, sentHash);
+    if (!confirmed.success) {
+      return { success: false, errorReason: 'transaction_failed', transaction: sentHash };
+    }
+
+    await pool.query(
+      `UPDATE x402_channels SET status = 'closing', closing_at = NOW(), updated_at = NOW() WHERE onchain_channel_id = $1`,
+      [onchainChannelId],
+    );
+
+    return { success: true, transaction: sentHash };
+  }
+
+  // checkpoint() and finalize_close() both need no party's auth entry at
+  // all — checkpoint() verifies the claim via a raw ed25519 signature
+  // argument (not Soroban account auth), and finalize_close() is fully
+  // permissionless by design (see the contract's own doc comment: "anyone
+  // can trigger this once the challenge window has elapsed"). That means
+  // the facilitator can build, sign, and submit these entirely on its own
+  // — no client-provided XDR to parse/relay, unlike open/close above.
+  async checkpointChannel(params: {
+    onchainChannelId: bigint;
+    cumulativeAmount: bigint;
+    nonce: bigint;
+    signature: Buffer;
+  }): Promise<FacilitatorCallResult> {
+    return this.submitFacilitatorCall(
+      'checkpoint',
+      [
+        nativeToScVal(params.onchainChannelId, { type: 'u64' }),
+        nativeToScVal(params.cumulativeAmount, { type: 'i128' }),
+        nativeToScVal(params.nonce, { type: 'u64' }),
+        nativeToScVal(params.signature, { type: 'bytes' }),
+      ],
+      'checkpoint',
+    );
+  }
+
+  async finalizeCloseChannel(onchainChannelId: bigint): Promise<FacilitatorCallResult> {
+    return this.submitFacilitatorCall(
+      'finalize_close',
+      [nativeToScVal(onchainChannelId, { type: 'u64' })],
+      'finalize_close',
+    );
+  }
+
+  async getChannelInfoOnChain(onchainChannelId: bigint): Promise<unknown> {
+    const server = new rpc.Server(RPC_URL);
+    const contract = new Contract(CHANNEL_CONTRACT_ID);
+    const signer = await getFacilitatorSigner();
+    // Simulation-only call — any funded-looking account works as the
+    // envelope's source, same reasoning Arbiter's stellarClient.js already
+    // documents for its own read-only simulateReadOnly() helper.
+    const account = await server.getAccount(signer.address);
+    const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: Networks.TESTNET })
+      .setTimeout(30)
+      .addOperation(contract.call('get_channel_info', nativeToScVal(onchainChannelId, { type: 'u64' })))
+      .build();
+    const sim = await server.simulateTransaction(tx);
+    if (!rpc.Api.isSimulationSuccess(sim) || !sim.result) {
+      throw new Error(`get_channel_info simulation failed for channel ${onchainChannelId}`);
+    }
+    return scValToNative(sim.result.retval);
+  }
+
+  private async submitFacilitatorCall(
+    functionName: string,
+    args: ReturnType<typeof nativeToScVal>[],
+    logLabel: string,
+  ): Promise<FacilitatorCallResult> {
+    const server = new rpc.Server(RPC_URL);
+    const signer = await getFacilitatorSigner();
+    const contract = new Contract(CHANNEL_CONTRACT_ID);
+
+    let sentHash: string;
+    try {
+      const account = await server.getAccount(signer.address);
+      const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: Networks.TESTNET })
+        .setTimeout(60)
+        .addOperation(contract.call(functionName, ...args))
+        .build();
+
+      const sim = await server.simulateTransaction(tx);
+      if (!rpc.Api.isSimulationSuccess(sim)) {
+        return { success: false, errorReason: `${logLabel}_simulation_failed` };
+      }
+      const sorobanData = sim.transactionData.build();
+      const prepared = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: Networks.TESTNET, sorobanData })
+        .setTimeout(60)
+        .addOperation(contract.call(functionName, ...args))
+        .build();
+
+      const { signedTxXdr, error: signError } = await signer.signTransaction(prepared.toXDR(), {
+        networkPassphrase: Networks.TESTNET,
+      });
+      if (signError || !signedTxXdr) {
+        return { success: false, errorReason: `${logLabel}_signing_failed` };
+      }
+
+      const txToSubmit = TransactionBuilder.fromXDR(signedTxXdr, Networks.TESTNET);
+      const sendResult = await server.sendTransaction(txToSubmit);
+      if (sendResult.status !== 'PENDING') {
+        return { success: false, errorReason: `${logLabel}_submission_failed` };
+      }
+      sentHash = sendResult.hash;
+    } catch (err) {
+      this.logger.error(`${logLabel} failed: ${err}`);
+      return { success: false, errorReason: `${logLabel}_failed` };
+    }
+
+    const confirmed = await this.pollForTransaction(server, sentHash);
+    if (!confirmed.success) {
+      return { success: false, errorReason: `${logLabel}_transaction_failed`, transaction: sentHash };
+    }
+    return { success: true, transaction: sentHash, returnValue: confirmed.returnValue };
   }
 
   private async pollForTransaction(

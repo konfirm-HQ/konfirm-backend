@@ -26,6 +26,13 @@ const openSchema = z.object({
   resource_url: z.string().url().optional(),
 });
 
+// Same client-signs shape as open — either party can request a close.
+// Fund realization happens later via finalize_close, driven by the keeper
+// once the challenge period elapses, not synchronously in this request.
+const closeSchema = z.object({
+  transaction: z.string().min(1),
+});
+
 // Same no-AuthGuard reasoning as x402.controller.ts — called by parties
 // with no prior relationship to Konfirm. Sits at the same 20/60s tier as
 // /x402/verify+/settle for /open (a real Soroban submission), but /claim
@@ -59,5 +66,15 @@ export class ChannelController {
       throw new BadRequestException(result.errorReason ?? 'open_failed');
     }
     return { success: true, channel_id: result.onchainChannelId, transaction: result.transaction };
+  }
+
+  @Post('close')
+  @Throttle({ default: { limit: 20, ttl: 60_000 } })
+  async close(@Body(new ZodValidationPipe(closeSchema)) body: z.infer<typeof closeSchema>) {
+    const result = await this.channel.closeChannel({ transactionXdr: body.transaction });
+    if (!result.success) {
+      throw new BadRequestException(result.errorReason ?? 'close_failed');
+    }
+    return { success: true, transaction: result.transaction };
   }
 }

@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { APP_FILTER, APP_GUARD } from '@nestjs/core';
+import { ScheduleModule } from '@nestjs/schedule';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { LoggerModule } from 'nestjs-pino';
 import { AllExceptionsFilter } from './observability/all-exceptions.filter';
@@ -49,6 +50,10 @@ const isProd = process.env.NODE_ENV === 'production';
     // external anchor/RPC needs a much lower ceiling than reading a public
     // link.
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 60 }]),
+    // Backs the channel keeper's @Cron() sweep (see x402/channel-keeper.service.ts)
+    // — deliberately in-process rather than a separate Railway service; see that
+    // file's module-level comment for why.
+    ScheduleModule.forRoot(),
     AuthModule,
     LinksModule,
     SessionsModule,
