@@ -229,6 +229,90 @@ describe('admin workflow: suspend/reactivate a merchant (e2e)', () => {
     });
   });
 
+  describe('fee revenue, users, and wallets: aggregations over existing payment data', () => {
+    // A fresh, never-reused payer address so payment_count/total_volume
+    // assertions aren't polluted by payments other describe blocks in this
+    // file insert against the shared e2e payer address.
+    const feWPayer = `G${'FEEUSERSWALLETS'.padEnd(55, 'A')}`;
+    let baselineFeeSummary: { payment_count: number; total_fee_usdc: string };
+    let blockedId: string;
+
+    beforeAll(async () => {
+      const before = await request(app.getHttpServer()).get('/admin/fee-revenue/summary').set('Cookie', adminCookie).expect(200);
+      baselineFeeSummary = before.body;
+
+      // One paid (fee counts), one refunded (fee must NOT count) — proves
+      // the summary is filtering on status, not just summing every row.
+      await pool.query(
+        `INSERT INTO payments (merchant_id, muxed_id, muxed_address, payer_address, asset_code, amount_usdc, fee_usdc, net_usdc, status, paging_token, tx_hash, ledger_sequence)
+         VALUES
+           ($1, 111, 'M...fw1', $2, 'XLM', 10, 1, 9, 'paid', $3, 'e2e-fw-tx-1', 1),
+           ($1, 112, 'M...fw2', $2, 'XLM', 20, 2, 18, 'refunded', $4, 'e2e-fw-tx-2', 1)`,
+        [merchantId, feWPayer, `e2e-fw-paging-1-${Date.now()}`, `e2e-fw-paging-2-${Date.now()}`],
+      );
+    });
+
+    afterAll(async () => {
+      await pool.query('DELETE FROM payments WHERE payer_address = $1', [feWPayer]);
+      if (blockedId) await pool.query('DELETE FROM blocked_addresses WHERE id = $1', [blockedId]);
+    });
+
+    it('fee revenue summary counts only the paid payment\'s fee, not the refunded one', async () => {
+      const res = await request(app.getHttpServer()).get('/admin/fee-revenue/summary').set('Cookie', adminCookie).expect(200);
+      expect(res.body.payment_count).toBe(baselineFeeSummary.payment_count + 1);
+      expect(Number(res.body.total_fee_usdc) - Number(baselineFeeSummary.total_fee_usdc)).toBeCloseTo(1, 5);
+    });
+
+    it('users lists the payer with both payments counted (paid AND refunded — this is activity history, not revenue)', async () => {
+      const res = await request(app.getHttpServer()).get('/admin/users').set('Cookie', adminCookie).expect(200);
+      const row = res.body.find((u: { payer_address: string }) => u.payer_address === feWPayer);
+      expect(row).toBeDefined();
+      expect(Number(row.payment_count)).toBe(2);
+      expect(Number(row.total_volume_usdc)).toBeCloseTo(30, 5);
+      expect(Number(row.refunded_count)).toBe(1);
+    });
+
+    it('wallets shows the payer role, then also shows blocked once the same address is blocked', async () => {
+      const before = await request(app.getHttpServer()).get('/admin/wallets').set('Cookie', adminCookie).expect(200);
+      const beforeRow = before.body.find((w: { address: string }) => w.address === feWPayer);
+      expect(beforeRow.roles).toEqual(['payer']);
+
+      const blockRes = await request(app.getHttpServer())
+        .post('/admin/compliance/blocked-addresses')
+        .set('Cookie', adminCookie)
+        .send({ stellar_address: feWPayer, reason: 'e2e wallets cross-reference test' })
+        .expect(201);
+      blockedId = blockRes.body.id;
+
+      const after = await request(app.getHttpServer()).get('/admin/wallets').set('Cookie', adminCookie).expect(200);
+      const afterRow = after.body.find((w: { address: string }) => w.address === feWPayer);
+      expect(afterRow.roles.sort()).toEqual(['blocked', 'payer']);
+    });
+  });
+
+  describe('merchant tier: admin can change it, identity verification is not implied', () => {
+    it('rejects an invalid tier value outright', async () => {
+      await request(app.getHttpServer())
+        .patch(`/admin/merchants/${merchantId}/tier`)
+        .set('Cookie', adminCookie)
+        .send({ risk_tier: 'not-a-real-tier' })
+        .expect(400);
+    });
+
+    it('accepts a valid tier and it actually takes effect', async () => {
+      const res = await request(app.getHttpServer())
+        .patch(`/admin/merchants/${merchantId}/tier`)
+        .set('Cookie', adminCookie)
+        .send({ risk_tier: 'enterprise', reason: 'e2e' })
+        .expect(200);
+      expect(res.body.risk_tier).toBe('enterprise');
+
+      const list = await request(app.getHttpServer()).get('/admin/merchants').set('Cookie', adminCookie).expect(200);
+      const row = list.body.find((m: { id: string }) => m.id === merchantId);
+      expect(row.risk_tier).toBe('enterprise');
+    });
+  });
+
   describe('reconciler: cursor can only move backward', () => {
     let originalCursor: string;
 

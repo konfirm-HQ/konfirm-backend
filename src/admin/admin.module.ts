@@ -16,6 +16,7 @@ import { AdminNotificationsService } from './admin-notifications.service';
 import { AdminTreasuryService } from './admin-treasury.service';
 import { AdminFeeRevenueService } from './admin-fee-revenue.service';
 import { AdminUsersService } from './admin-users.service';
+import { AdminWalletsService } from './admin-wallets.service';
 
 @Module({
   imports: [AdminAuthModule, WithdrawalsModule],
@@ -35,6 +36,7 @@ import { AdminUsersService } from './admin-users.service';
     AdminTreasuryService,
     AdminFeeRevenueService,
     AdminUsersService,
+    AdminWalletsService,
   ],
 })
 export class AdminModule {}

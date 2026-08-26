@@ -16,9 +16,15 @@ import { AdminNotificationsService } from './admin-notifications.service';
 import { AdminTreasuryService } from './admin-treasury.service';
 import { AdminFeeRevenueService } from './admin-fee-revenue.service';
 import { AdminUsersService } from './admin-users.service';
+import { AdminWalletsService } from './admin-wallets.service';
 
 const setMerchantStatusSchema = z.object({
   status: z.enum(['active', 'suspended']),
+  reason: z.string().max(500).optional(),
+});
+
+const setMerchantTierSchema = z.object({
+  risk_tier: z.enum(['unverified', 'standard', 'established', 'enterprise']),
   reason: z.string().max(500).optional(),
 });
 
@@ -59,6 +65,7 @@ export class AdminController {
     private readonly treasury: AdminTreasuryService,
     private readonly feeRevenue: AdminFeeRevenueService,
     private readonly users: AdminUsersService,
+    private readonly wallets: AdminWalletsService,
   ) {}
 
   @Get('stats')
@@ -81,6 +88,20 @@ export class AdminController {
   ) {
     const merchant = await this.merchants.setStatus(id, body.status);
     await this.actions.log(req.admin.id, `merchant.${body.status === 'suspended' ? 'suspend' : 'reactivate'}`, 'merchant', id, {
+      reason: body.reason,
+    });
+    return merchant;
+  }
+
+  @Patch('merchants/:id/tier')
+  async setMerchantTier(
+    @Param('id') id: string,
+    @Body(new ZodValidationPipe(setMerchantTierSchema)) body: z.infer<typeof setMerchantTierSchema>,
+    @Req() req: AuthedAdminRequest,
+  ) {
+    const merchant = await this.merchants.setTier(id, body.risk_tier);
+    await this.actions.log(req.admin.id, 'merchant.set-tier', 'merchant', id, {
+      risk_tier: body.risk_tier,
       reason: body.reason,
     });
     return merchant;
@@ -211,6 +232,15 @@ export class AdminController {
   @Get('users')
   listUsers(@Query('limit') limit?: string, @Query('offset') offset?: string) {
     return this.users.list(limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
+  }
+
+  // --- Wallets ---
+  // Cross-references payer/merchant/blocked roles for the same address —
+  // see AdminWalletsService for why this isn't a new data source.
+
+  @Get('wallets')
+  listWallets(@Query('limit') limit?: string, @Query('offset') offset?: string) {
+    return this.wallets.list(limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
   }
 
   // Surfaced back to the admin UI as a recent-activity feed rather than
