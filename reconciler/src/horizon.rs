@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
+use rust_decimal::Decimal;
 use serde::Deserialize;
+use std::str::FromStr;
 
 // The /payments endpoint is misleadingly named — it actually returns every
 // operation type that can move an asset (payment, create_account,
@@ -138,5 +140,78 @@ impl HorizonClient {
             .first()
             .map(|r| r.paging_token.clone())
             .unwrap_or_else(|| "0".to_string()))
+    }
+
+    /// Current XLM→USDC reference rate (USDC per 1 XLM), sourced from
+    /// Stellar's own order book rather than a new external price API — the
+    /// reconciler already depends on Horizon for everything else, so this
+    /// adds zero new dependency class. Uses the midpoint of the best bid and
+    /// best ask (the standard "mark price" convention most systems display
+    /// as the current rate), not a single side of the book. This is a
+    /// current-moment rate, not the rate at the exact ledger the payment
+    /// landed on — Horizon's order book has no historical/point-in-time
+    /// query, and the reconciler's own poll lag (seconds, not minutes)
+    /// makes that gap immaterial for accounting purposes; it would matter
+    /// for anything latency-sensitive like arbitrage, which this isn't.
+    pub async fn xlm_usdc_rate(&self, usdc_issuer: &str) -> Result<Decimal> {
+        let url = format!(
+            "{}/order_book?selling_asset_type=native&buying_asset_type=credit_alphanum4&buying_asset_code=USDC&buying_asset_issuer={}",
+            self.base_url, usdc_issuer
+        );
+        let resp = self
+            .get_with_retry(&url)
+            .await
+            .context("horizon order_book request failed")?
+            .error_for_status()
+            .context("horizon returned an error status for order_book")?
+            .json::<OrderBookResponse>()
+            .await
+            .context("failed to parse horizon order_book response")?;
+
+        let best_bid = resp.bids.first().map(|l| Decimal::from_str(&l.price)).transpose()?;
+        let best_ask = resp.asks.first().map(|l| Decimal::from_str(&l.price)).transpose()?;
+        match (best_bid, best_ask) {
+            (Some(bid), Some(ask)) => Ok((bid + ask) / Decimal::from(2)),
+            (Some(bid), None) => Ok(bid),
+            (None, Some(ask)) => Ok(ask),
+            (None, None) => anyhow::bail!("XLM/USDC order book is empty on both sides — no rate available"),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct OrderBookLevel {
+    price: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct OrderBookResponse {
+    bids: Vec<OrderBookLevel>,
+    asks: Vec<OrderBookLevel>,
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    const USDC_TESTNET_ISSUER: &str = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
+
+    // Against the real, live testnet order book, not a mock — confirmed
+    // manually first (curl'd the same endpoint, saw a real non-empty book,
+    // best bid 0.273 at the time this was written) before trusting this
+    // assertion range. XLM has never traded anywhere near $1000, so this
+    // bound is generous against normal price movement or testnet-specific
+    // liquidity thinness, while still catching a genuinely broken parse
+    // (e.g. an empty-book error, or a sign/decimal-place bug producing 0 or
+    // something absurd).
+    #[tokio::test]
+    async fn xlm_usdc_rate_returns_a_real_positive_rate_from_live_testnet() {
+        let client = HorizonClient::new("https://horizon-testnet.stellar.org");
+        let rate = client
+            .xlm_usdc_rate(USDC_TESTNET_ISSUER)
+            .await
+            .expect("live testnet order_book request should succeed");
+        assert!(rate > Decimal::from(0), "rate should be positive, got {rate}");
+        assert!(rate < Decimal::from(1000), "rate should be well under $1000/XLM, got {rate}");
     }
 }

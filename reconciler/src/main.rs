@@ -10,6 +10,13 @@ use store::Store;
 
 const HORIZON_TESTNET: &str = "https://horizon-testnet.stellar.org";
 
+// Must match konfirm-backend's src/common/asset.ts USDC_TESTNET_ISSUER —
+// the same asset the checkout flow itself resolves 'USDC' to. Duplicated
+// here rather than shared because this is a separate Rust binary with no
+// existing cross-language config-sharing mechanism; if that issuer ever
+// changes, both places need updating together.
+const USDC_TESTNET_ISSUER: &str = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
+
 fn database_url() -> String {
     std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres:///konfirm_dev".to_string())
@@ -87,6 +94,11 @@ async fn watch(merchant_address: &str, max_polls: u32, interval_secs: u64) -> Re
         tracing::info!(poll_num, cursor, "polling horizon");
         let ops = horizon.payments_since(merchant_address, &cursor, 50).await?;
 
+        // Fetched at most once per poll, lazily, only if this batch
+        // actually contains an XLM payment — most batches won't, and the
+        // rate doesn't meaningfully change within one poll interval anyway.
+        let mut xlm_usdc_rate: Option<rust_decimal::Decimal> = None;
+
         for op in &ops {
             if op.op_type != "payment" {
                 cursor = op.paging_token.clone();
@@ -127,8 +139,32 @@ async fn watch(merchant_address: &str, max_polls: u32, interval_secs: u64) -> Re
                 ),
             };
             let payer = op.from.clone().unwrap_or_default();
-            let amount = op.amount.as_deref().unwrap_or("0");
+            let raw_amount = op.amount.as_deref().unwrap_or("0");
             let muxed_address = op.to_muxed.clone().unwrap_or_else(|| op.to.clone().unwrap_or_default());
+
+            // amount_usdc/fee_usdc/net_usdc are meant to be USD-equivalent
+            // regardless of what asset was actually sent — asset_code/
+            // asset_issuer already preserve the real audit trail of what
+            // was paid, so converting here doesn't lose that information.
+            // Previously this bound the raw XLM count directly into those
+            // columns with no conversion at all, silently understating (at
+            // current XLM/USD levels) every XLM-denominated payment's real
+            // dollar value — found while building an admin Exchange Rate
+            // view on top of what turned out to be already-wrong numbers.
+            let usd_amount: String = if asset_code == "XLM" {
+                let rate = match xlm_usdc_rate {
+                    Some(r) => r,
+                    None => {
+                        let r = horizon.xlm_usdc_rate(USDC_TESTNET_ISSUER).await?;
+                        xlm_usdc_rate = Some(r);
+                        r
+                    }
+                };
+                let raw: rust_decimal::Decimal = raw_amount.parse().context("horizon returned a non-decimal XLM amount")?;
+                (raw * rate).to_string()
+            } else {
+                raw_amount.to_string()
+            };
 
             let recorded = store
                 .record_payment_if_new(
@@ -138,7 +174,7 @@ async fn watch(merchant_address: &str, max_polls: u32, interval_secs: u64) -> Re
                     &payer,
                     &asset_code,
                     asset_issuer.as_deref(),
-                    amount,
+                    &usd_amount,
                     &op.paging_token,
                     &op.transaction_hash,
                 )
@@ -149,7 +185,8 @@ async fn watch(merchant_address: &str, max_polls: u32, interval_secs: u64) -> Re
                     muxed_id,
                     merchant_id = %merchant.id,
                     payer = %payer,
-                    amount = %amount,
+                    raw_amount = %raw_amount,
+                    usd_amount = %usd_amount,
                     asset = %asset_code,
                     tx_hash = %op.transaction_hash,
                     locally_blocked = recorded.locally_blocked,
