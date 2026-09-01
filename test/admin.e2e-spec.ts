@@ -431,6 +431,19 @@ describe('admin workflow: suspend/reactivate a merchant (e2e)', () => {
       expect(daysUntilExpiry).toBeLessThanOrEqual(30);
     });
 
+    it('the referred merchant can see their own active promo via /auth/me/referrals', async () => {
+      const login = await request(app.getHttpServer())
+        .post('/auth/login')
+        .send({ email: referredEmail, password: 'a-real-password-000' })
+        .expect(200);
+      const referredCookie = login.headers['set-cookie'][0].split(';')[0];
+
+      const mine = await request(app.getHttpServer()).get('/auth/me/referrals').set('Cookie', referredCookie).expect(200);
+      expect(mine.body.promo).toEqual(
+        expect.objectContaining({ active: true, feeBps: 0, volumeCapUsdc: '500' }),
+      );
+    });
+
     it('activation flips to true once the referred merchant has a real paid payment, with no write-time hook', async () => {
       await pool.query(
         `INSERT INTO payments (merchant_id, muxed_id, muxed_address, payer_address, asset_code, amount_usdc, net_usdc, status, paging_token, tx_hash, ledger_sequence)

@@ -139,8 +139,33 @@ export class AuthService {
 
   // "Activated" is computed here (EXISTS a paid payment), not stored — see
   // migration 014's comment for why that's deliberate.
-  async myReferrals(merchantId: string): Promise<{ code: string | null; referrals: unknown[] }> {
-    const { rows: codeRows } = await pool.query('SELECT referral_code FROM merchants WHERE id = $1', [merchantId]);
+  async myReferrals(merchantId: string): Promise<{
+    code: string | null;
+    promo: { active: boolean; feeBps: number | null; expiresAt: string | null; volumeCapUsdc: string | null; volumeSoFarUsdc: string } | null;
+    referrals: unknown[];
+  }> {
+    // Same "active" definition the reconciler's effective_fee_bps() uses
+    // (time valid, and under the volume cap if one is set) -- computed
+    // here purely for display, so a merchant can actually see the
+    // discount that's silently applying to their payments rather than
+    // discovering it only by noticing a smaller-than-expected fee.
+    const { rows } = await pool.query(
+      `SELECT
+         referral_code,
+         promo_fee_bps,
+         promo_expires_at,
+         promo_volume_cap_usdc,
+         COALESCE((SELECT SUM(amount_usdc) FROM payments WHERE merchant_id = $1 AND status = 'paid'), 0) AS volume_so_far_usdc,
+         (promo_fee_bps IS NOT NULL
+           AND promo_expires_at > NOW()
+           AND (promo_volume_cap_usdc IS NULL
+                OR promo_volume_cap_usdc > COALESCE((SELECT SUM(amount_usdc) FROM payments WHERE merchant_id = $1 AND status = 'paid'), 0))
+         ) AS promo_active
+       FROM merchants WHERE id = $1`,
+      [merchantId],
+    );
+    const row = rows[0];
+
     const { rows: referrals } = await pool.query(
       `SELECT m.name, m.email, r.created_at,
               EXISTS(SELECT 1 FROM payments p WHERE p.merchant_id = r.referred_id AND p.status = 'paid') AS activated
@@ -150,7 +175,20 @@ export class AuthService {
        ORDER BY r.created_at DESC`,
       [merchantId],
     );
-    return { code: codeRows[0]?.referral_code ?? null, referrals };
+
+    return {
+      code: row?.referral_code ?? null,
+      promo: row?.promo_fee_bps === null
+        ? null
+        : {
+            active: row.promo_active,
+            feeBps: row.promo_fee_bps,
+            expiresAt: row.promo_expires_at,
+            volumeCapUsdc: row.promo_volume_cap_usdc,
+            volumeSoFarUsdc: row.volume_so_far_usdc,
+          },
+      referrals,
+    };
   }
 
   verifyToken(token: string): MerchantClaims {
