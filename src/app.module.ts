@@ -13,6 +13,7 @@ import { DepositsModule } from './deposits/deposits.module';
 import { AdminAuthModule } from './admin-auth/admin-auth.module';
 import { AdminModule } from './admin/admin.module';
 import { X402Module } from './x402/x402.module';
+import { ReferralsModule } from './referrals/referrals.module';
 
 const isProd = process.env.NODE_ENV === 'production';
 
@@ -63,6 +64,7 @@ const isProd = process.env.NODE_ENV === 'production';
     AdminAuthModule,
     AdminModule,
     X402Module,
+    ReferralsModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },

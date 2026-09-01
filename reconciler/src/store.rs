@@ -27,6 +27,25 @@ pub struct RecordedPayment {
     pub locally_blocked: bool,
 }
 
+/// Pure decision logic for the referral-trial discount, deliberately
+/// separated from the SQL that fetches its inputs (see
+/// `Store::effective_fee_bps`) so it's unit-testable without a database or
+/// any date/time handling in Rust — `promo_time_valid` is a plain bool
+/// already resolved by Postgres's own `NOW()`, not a timestamp this
+/// function has to parse or compare itself.
+fn resolve_effective_fee_bps(
+    base_fee_bps: i32,
+    promo_fee_bps: Option<i32>,
+    promo_time_valid: bool,
+    promo_volume_cap_usdc: Option<Decimal>,
+    volume_so_far_usdc: Decimal,
+) -> i32 {
+    match promo_fee_bps {
+        Some(promo) if promo_time_valid && promo_volume_cap_usdc.map_or(true, |cap| volume_so_far_usdc < cap) => promo,
+        _ => base_fee_bps,
+    }
+}
+
 impl Store {
     pub async fn connect(database_url: &str) -> Result<Self> {
         let pool = PgPoolOptions::new()
@@ -112,6 +131,36 @@ impl Store {
     /// this muxed_id — a terminal tap, an agent payment, or a payer who
     /// bypassed the API and sent XLM straight to the address — link_id is
     /// correctly NULL rather than a guess.
+    /// Recomputed fresh on every payment, not cached alongside `Merchant`
+    /// (which is fetched once per `watch` run and reused across the whole
+    /// session) — a promo can expire, or its volume cap can be crossed,
+    /// partway through a long-running session, and the next payment must
+    /// see that. All date/time comparison happens here in SQL (`NOW()`),
+    /// not in Rust, specifically so the decision logic in
+    /// `resolve_effective_fee_bps` stays a pure, unit-testable function
+    /// with no chrono dependency at all.
+    async fn effective_fee_bps(&self, merchant: &Merchant) -> Result<i32> {
+        let row: (Option<i32>, bool, Option<Decimal>, Decimal) = sqlx::query_as(
+            "SELECT
+                promo_fee_bps,
+                (promo_expires_at IS NOT NULL AND promo_expires_at > NOW()) AS promo_time_valid,
+                promo_volume_cap_usdc,
+                COALESCE((SELECT SUM(amount_usdc) FROM payments WHERE merchant_id = $1 AND status = 'paid'), 0)
+             FROM merchants WHERE id = $1",
+        )
+        .bind(merchant.id)
+        .fetch_one(&self.pool)
+        .await?;
+        let (promo_fee_bps, promo_time_valid, promo_volume_cap_usdc, volume_so_far_usdc) = row;
+        Ok(resolve_effective_fee_bps(
+            merchant.fee_bps,
+            promo_fee_bps,
+            promo_time_valid,
+            promo_volume_cap_usdc,
+            volume_so_far_usdc,
+        ))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn record_payment_if_new(
         &self,
@@ -127,7 +176,8 @@ impl Store {
         tx_hash: &str,
     ) -> Result<Option<RecordedPayment>> {
         let gross = Decimal::from_str(amount).context("horizon returned a non-decimal amount")?;
-        let fee = (gross * Decimal::from(merchant.fee_bps)) / Decimal::from(10_000);
+        let fee_bps = self.effective_fee_bps(merchant).await?;
+        let fee = (gross * Decimal::from(fee_bps)) / Decimal::from(10_000);
         let net = gross - fee;
 
         // Horizon paging tokens for operations are TOIDs: ledger sequence in
@@ -203,5 +253,69 @@ impl Store {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn no_promo_uses_the_base_rate() {
+        assert_eq!(resolve_effective_fee_bps(10, None, false, None, Decimal::from(0)), 10);
+    }
+
+    #[test]
+    fn active_promo_within_time_and_volume_uses_the_promo_rate() {
+        assert_eq!(
+            resolve_effective_fee_bps(10, Some(0), true, Some(Decimal::from(500)), Decimal::from(100)),
+            0
+        );
+    }
+
+    #[test]
+    fn expired_promo_falls_back_to_the_base_rate_even_with_volume_left() {
+        assert_eq!(
+            resolve_effective_fee_bps(10, Some(0), false, Some(Decimal::from(500)), Decimal::from(100)),
+            10
+        );
+    }
+
+    #[test]
+    fn promo_exactly_at_the_volume_cap_no_longer_applies() {
+        // Strictly less-than, not less-than-or-equal — the 500th dollar
+        // itself is charged at the base rate, matching "first $500 free"
+        // read the ordinary way (500 dollars have already been covered).
+        assert_eq!(
+            resolve_effective_fee_bps(10, Some(0), true, Some(Decimal::from(500)), Decimal::from(500)),
+            10
+        );
+    }
+
+    #[test]
+    fn promo_just_under_the_volume_cap_still_applies() {
+        assert_eq!(
+            resolve_effective_fee_bps(10, Some(0), true, Some(Decimal::new(4999, 1)), Decimal::from(499)),
+            0
+        );
+    }
+
+    #[test]
+    fn referrer_reward_has_no_volume_cap_and_applies_purely_on_time() {
+        // The referrer's reward is time-only (promo_volume_cap_usdc = NULL)
+        // — a large existing volume must never disqualify it.
+        assert_eq!(
+            resolve_effective_fee_bps(10, Some(5), true, None, Decimal::from(1_000_000)),
+            5
+        );
+    }
+
+    #[test]
+    fn no_promo_fee_bps_set_uses_base_rate_regardless_of_other_fields() {
+        // A merchant who was never referred has promo_fee_bps = NULL —
+        // stray non-NULL time/volume fields (shouldn't happen, but this is
+        // the function's actual contract) must not accidentally activate
+        // a discount that was never granted.
+        assert_eq!(resolve_effective_fee_bps(10, None, true, Some(Decimal::from(500)), Decimal::from(0)), 10);
     }
 }

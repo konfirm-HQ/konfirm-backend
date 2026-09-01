@@ -13,6 +13,16 @@ const JWT_SECRET = process.env.JWT_SECRET ?? (() => {
 })();
 const TOKEN_TTL = '30d';
 
+// A referred merchant's onboarding trial — removes the biggest friction
+// point in trying a new payment processor (paying real fees before you
+// know it's worth it), capped both ways so it stays a trial, not a
+// permanent discount: 30 days OR $500 processed, whichever comes first.
+// See effective_fee_bps() in reconciler/src/store.rs for how this is
+// actually applied per-payment.
+const REFERRAL_TRIAL_FEE_BPS = 0;
+const REFERRAL_TRIAL_DAYS = 30;
+const REFERRAL_TRIAL_VOLUME_CAP_USDC = 500;
+
 export interface MerchantClaims {
   id: string;
   email: string;
@@ -58,11 +68,19 @@ export class AuthService {
 
     const passwordHash = await bcrypt.hash(password, 10);
     const ownCode = await this.generateUniqueReferralCode();
+    // Trial fields stay NULL for a non-referred signup — effective_fee_bps()
+    // treats a NULL promo_fee_bps as "no promo, use the base rate", so
+    // there's no separate "no discount" branch to keep in sync here.
+    const promoFeeBps = referrerId ? REFERRAL_TRIAL_FEE_BPS : null;
+    const promoExpiresAt = referrerId ? new Date(Date.now() + REFERRAL_TRIAL_DAYS * 24 * 60 * 60 * 1000) : null;
+    const promoVolumeCap = referrerId ? REFERRAL_TRIAL_VOLUME_CAP_USDC : null;
     const { rows } = await pool.query(
-      `INSERT INTO merchants (email, password_hash, name, stellar_base_address, status, referral_code)
-       VALUES ($1, $2, $3, $4, 'active', $5)
+      `INSERT INTO merchants
+        (email, password_hash, name, stellar_base_address, status, referral_code,
+         promo_fee_bps, promo_expires_at, promo_volume_cap_usdc)
+       VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8)
        RETURNING id, email, name, stellar_base_address`,
-      [email, passwordHash, name, stellarBaseAddress, ownCode],
+      [email, passwordHash, name, stellarBaseAddress, ownCode, promoFeeBps, promoExpiresAt, promoVolumeCap],
     );
     const merchant = rows[0] as MerchantClaims;
 

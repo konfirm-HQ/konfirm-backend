@@ -5,6 +5,7 @@ import cookieParser from 'cookie-parser';
 import request from 'supertest';
 import { AppModule } from '../src/app.module';
 import { pool } from '../src/db/pool';
+import { ReferralRewardsService } from '../src/referrals/referral-rewards.service';
 
 // The point of this feature: an admin can suspend a merchant and have it
 // actually take effect immediately — not just on the merchant's next login,
@@ -418,6 +419,18 @@ describe('admin workflow: suspend/reactivate a merchant (e2e)', () => {
       expect(row.activated).toBe(false);
     });
 
+    it('the referred merchant gets the trial discount fields set at signup', async () => {
+      const { rows } = await pool.query(
+        'SELECT promo_fee_bps, promo_expires_at, promo_volume_cap_usdc FROM merchants WHERE id = $1',
+        [referredId],
+      );
+      expect(rows[0].promo_fee_bps).toBe(0);
+      expect(Number(rows[0].promo_volume_cap_usdc)).toBe(500);
+      const daysUntilExpiry = (new Date(rows[0].promo_expires_at).getTime() - Date.now()) / (24 * 60 * 60 * 1000);
+      expect(daysUntilExpiry).toBeGreaterThan(29);
+      expect(daysUntilExpiry).toBeLessThanOrEqual(30);
+    });
+
     it('activation flips to true once the referred merchant has a real paid payment, with no write-time hook', async () => {
       await pool.query(
         `INSERT INTO payments (merchant_id, muxed_id, muxed_address, payer_address, asset_code, amount_usdc, net_usdc, status, paging_token, tx_hash, ledger_sequence)
@@ -434,6 +447,37 @@ describe('admin workflow: suspend/reactivate a merchant (e2e)', () => {
       expect(adminRow).toBeDefined();
       expect(adminRow.activated).toBe(true);
       expect(adminRow.referrer_email).toBe(referrerEmail);
+    });
+
+    it('the reward sweep grants the referrer a 50%-off, time-only promo exactly once', async () => {
+      const before = await pool.query('SELECT fee_bps FROM merchants WHERE id = $1', [referrerId]);
+      const baseFeeBps: number = before.rows[0].fee_bps;
+
+      // Calling sweep() directly (it's a plain injectable method) rather
+      // than waiting on the real 5-minute @Cron() interval — same reason
+      // ChannelKeeperService's sweep() is tested this way.
+      const rewards = app.get(ReferralRewardsService);
+      await rewards.sweep();
+
+      const referral = await pool.query('SELECT reward_granted_at FROM referrals WHERE referred_id = $1', [referredId]);
+      expect(referral.rows[0].reward_granted_at).not.toBeNull();
+
+      const referrer = await pool.query(
+        'SELECT promo_fee_bps, promo_expires_at, promo_volume_cap_usdc FROM merchants WHERE id = $1',
+        [referrerId],
+      );
+      expect(referrer.rows[0].promo_fee_bps).toBe(Math.floor(baseFeeBps / 2));
+      expect(referrer.rows[0].promo_volume_cap_usdc).toBeNull();
+      const daysUntilExpiry = (new Date(referrer.rows[0].promo_expires_at).getTime() - Date.now()) / (24 * 60 * 60 * 1000);
+      expect(daysUntilExpiry).toBeGreaterThan(29);
+      expect(daysUntilExpiry).toBeLessThanOrEqual(30);
+
+      // Idempotency: a second sweep must not re-grant (reward_granted_at
+      // IS NULL is no longer true for this referral, so it's excluded).
+      const grantedAtFirst = referral.rows[0].reward_granted_at;
+      await rewards.sweep();
+      const referralAgain = await pool.query('SELECT reward_granted_at FROM referrals WHERE referred_id = $1', [referredId]);
+      expect(referralAgain.rows[0].reward_granted_at).toEqual(grantedAtFirst);
     });
   });
 
