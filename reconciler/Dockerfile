@@ -5,36 +5,29 @@
 # ("GLIBC_2.38/2.39 not found"), crash-looping the container. Confirmed live
 # against a real failed deployment, not a defensive guess.
 FROM rust:1-bookworm AS builder
-# build-essential (gcc/g++/make) and libdbus-1-dev are both required by
-# stellar-cli's native dependencies (cc-rs needs a real C++ compiler;
-# libdbus-sys needs D-Bus headers to compile at all, even though the
-# --secure-store feature that actually uses D-Bus is never invoked here) —
-# both confirmed the hard way against two separate failed Railway builds.
-RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev ca-certificates build-essential libdbus-1-dev libudev-dev \
+# build-essential (gcc/g++/make), pkg-config, and libssl-dev are for the
+# reconciler binary's own build, not stellar-cli — soroban-client's reqwest
+# dependency pulls in native-tls (confirmed via `cargo tree -i native-tls`),
+# which links against system OpenSSL on Linux (unlike macOS, where
+# native-tls uses Security.framework instead — a local `cargo build` here
+# doesn't prove this stage needs nothing). libdbus-1-dev/libudev-dev, which
+# used to be required by stellar-cli's own native dependencies, are gone
+# now that the CLI isn't built here at all — compliance.rs calls the
+# compliance contract over RPC directly instead (see that file).
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev ca-certificates build-essential \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 RUN cargo build --release
 
-# Same `stellar` CLI the on-chain compliance check needs (src/compliance.rs)
-# — built in this same Rust stage since it's already paying the toolchain
-# cost building the reconciler binary itself.
-RUN cargo install --locked stellar-cli --root /out
-
 FROM debian:bookworm-slim
-# libssl3, libdbus-1-3, libudev1 (the runtime .so libraries, not the -dev
-# headers already used by the builder stage) — the compiled `stellar`
-# binary carries hard dynamic-link dependencies on all three even though
-# the D-Bus/hardware-wallet features that actually use them are never
-# invoked here. Confirmed live in production, one at a time ("libdbus-1.so.3"
-# then "libssl.so.3"), via the identical binary in konfirm-backend/Dockerfile
-# — installing all three together here rather than repeating that discovery
-# a third time for libudev.
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libssl3 libdbus-1-3 libudev1 \
+# libssl3 (native-tls's runtime dependency, same reasoning as the builder
+# stage) and ca-certificates stay; libdbus-1-3/libudev1 are gone along with
+# the `stellar` binary that was the only thing needing them.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libssl3 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /build/target/release/konfirm-reconciler /usr/local/bin/konfirm-reconciler
-COPY --from=builder /out/bin/stellar /usr/local/bin/stellar
 
 # No internal `while true` restart loop here — the hosting platform's own
 # restart-on-exit policy relaunches this when `watch` exits (hitting
