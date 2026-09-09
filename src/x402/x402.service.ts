@@ -6,7 +6,7 @@ import { ExactStellarScheme } from '@x402/stellar/exact/facilitator';
 import type { PaymentPayload, PaymentRequirements, SettleResponse, SupportedResponse, VerifyResponse } from './x402.types';
 import { pool } from '../db/pool';
 import { isAllowedOnChain } from '../common/onchain-compliance';
-import { getFacilitatorSigner } from '../common/facilitator-signer';
+import { getFacilitatorSigner, withFacilitatorSubmissionLock } from '../common/facilitator-signer';
 
 @Injectable()
 export class X402Service implements OnModuleInit {
@@ -148,7 +148,13 @@ export class X402Service implements OnModuleInit {
     }
 
     try {
-      const result = await this.scheme.settle(payload, requirements);
+      // Serialized against every other facilitator-signed submission
+      // (channel open/close, checkpoint, finalize_close) — the package's
+      // own settle() fetches the facilitator account's sequence number
+      // with no lock of its own, so two settlements (or a settlement and
+      // a keeper sweep) landing at the same time will otherwise race on
+      // it and one submission fails outright. See facilitator-signer.ts.
+      const result = await withFacilitatorSubmissionLock(() => this.scheme.settle(payload, requirements));
       const payer = result.payer ?? verifyResult.payer;
       if (payer) {
         await this.recordAttempt({

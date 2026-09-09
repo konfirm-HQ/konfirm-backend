@@ -29,3 +29,28 @@ export function getFacilitatorSigner(): Promise<Ed25519Signer> {
   }
   return signerPromise;
 }
+
+// Stellar allows exactly one in-flight transaction per source account
+// sequence number. Every facilitator-submitted transaction — x402 single-
+// shot settlement, channel open/close, and the keeper's checkpoint/
+// finalize_close — signs with this same signer/account, so two of them
+// racing (e.g. two concurrent /x402/settle calls, or a settle landing
+// mid-sweep) independently fetch the same "current" sequence number and
+// only one submission survives; the other fails with a bad-sequence
+// error. A simple promise-chained queue serializes just the
+// fetch-sequence-through-submit critical section across every call site
+// sharing this signer, without needing a distributed lock — there is only
+// ever one process holding this signer's key. Chained with `.then(fn, fn)`
+// rather than `.finally()` so the queue always advances to the next
+// waiter regardless of whether the previous submission succeeded or
+// threw — a `.finally()` here would still surface the rejection.
+let submissionQueue: Promise<unknown> = Promise.resolve();
+
+export function withFacilitatorSubmissionLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = submissionQueue.then(fn, fn);
+  submissionQueue = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}

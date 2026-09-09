@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import {
+  Account,
   Address,
   BASE_FEE,
   Contract,
@@ -13,7 +14,7 @@ import {
 } from '@stellar/stellar-sdk';
 import { pool } from '../db/pool';
 import { verifyClaimSignature } from '../common/channel-claim';
-import { getFacilitatorSigner } from '../common/facilitator-signer';
+import { getFacilitatorSigner, withFacilitatorSubmissionLock } from '../common/facilitator-signer';
 import { isAllowedOnChain } from '../common/onchain-compliance';
 
 export interface FacilitatorCallResult {
@@ -109,12 +110,29 @@ export class ChannelService {
       return { accepted: false, reason: 'invalid_signature' };
     }
 
-    await pool.query(
+    // WHERE pending_nonce < $3 makes this a real compare-and-swap, not a
+    // blind write — the SELECT above and this UPDATE are two separate
+    // round-trips, so two concurrent claims can both read the same
+    // starting state, both pass the monotonicity check in JS above, and
+    // then race each other's UPDATE. Without the guard, whichever write
+    // lands last always wins regardless of which claim was actually
+    // newer — confirmed for real: 30 concurrent valid claims (nonces
+    // 3-32) against the live testnet channel left the row at nonce=28
+    // instead of the expected nonce=32, silently losing an
+    // already-accepted higher claim. The guard makes a losing claim's
+    // write a no-op (rowCount 0) instead of a stale overwrite; the row
+    // count is checked and reported so the caller learns it lost the
+    // race rather than being told a claim was durably accepted when it
+    // wasn't.
+    const { rowCount } = await pool.query(
       `UPDATE x402_channels
        SET pending_amount = $2, pending_nonce = $3, pending_signature = $4, last_activity_at = NOW(), updated_at = NOW()
-       WHERE onchain_channel_id = $1`,
+       WHERE onchain_channel_id = $1 AND pending_nonce < $3`,
       [params.onchainChannelId.toString(), params.cumulativeAmount.toString(), params.nonce.toString(), params.signature.toString('hex')],
     );
+    if (rowCount === 0) {
+      return { accepted: false, reason: 'stale_claim' };
+    }
 
     return { accepted: true };
   }
@@ -197,43 +215,56 @@ export class ChannelService {
       return { success: false, errorReason: 'simulation_failed' };
     }
 
-    let sentHash: string;
-    try {
-      const facilitatorAccount = await server.getAccount(signer.address);
-      const sorobanData = simResponse.transactionData.build();
-      const rebuiltTx = new TransactionBuilder(facilitatorAccount, {
-        fee: BASE_FEE,
-        networkPassphrase: Networks.TESTNET,
-        sorobanData,
-      })
-        .setTimeout(60)
-        .addOperation(Operation.invokeHostFunction(operation))
-        .build();
+    // Held through polling-to-confirmation, not just through submission —
+    // releasing the lock right after sendTransaction() returns PENDING
+    // would let the next queued caller fetch the account before this
+    // transaction actually lands on-chain, handing it the same
+    // now-stale sequence number instead of a genuinely fresh one. See
+    // facilitator-signer.ts's withFacilitatorSubmissionLock.
+    const submission = await withFacilitatorSubmissionLock(async (): Promise<
+      { ok: true; hash: string; returnValue: unknown } | { ok: false; result: OpenChannelResult }
+    > => {
+      try {
+        const facilitatorAccount = await server.getAccount(signer.address);
+        const sorobanData = simResponse.transactionData.build();
+        const rebuiltTx = new TransactionBuilder(facilitatorAccount, {
+          fee: BASE_FEE,
+          networkPassphrase: Networks.TESTNET,
+          sorobanData,
+        })
+          .setTimeout(60)
+          .addOperation(Operation.invokeHostFunction(operation))
+          .build();
 
-      const { signedTxXdr, error: signError } = await signer.signTransaction(rebuiltTx.toXDR(), {
-        networkPassphrase: Networks.TESTNET,
-      });
-      if (signError || !signedTxXdr) {
-        return { success: false, errorReason: 'signing_failed' };
-      }
+        const { signedTxXdr, error: signError } = await signer.signTransaction(rebuiltTx.toXDR(), {
+          networkPassphrase: Networks.TESTNET,
+        });
+        if (signError || !signedTxXdr) {
+          return { ok: false, result: { success: false, errorReason: 'signing_failed' } };
+        }
 
-      const txToSubmit = TransactionBuilder.fromXDR(signedTxXdr, Networks.TESTNET);
-      const sendResult = await server.sendTransaction(txToSubmit);
-      if (sendResult.status !== 'PENDING') {
-        return { success: false, errorReason: 'submission_failed' };
+        const txToSubmit = TransactionBuilder.fromXDR(signedTxXdr, Networks.TESTNET);
+        const sendResult = await server.sendTransaction(txToSubmit);
+        if (sendResult.status !== 'PENDING') {
+          return { ok: false, result: { success: false, errorReason: 'submission_failed' } };
+        }
+
+        const confirmed = await this.pollForTransaction(server, sendResult.hash);
+        if (!confirmed.success) {
+          return { ok: false, result: { success: false, errorReason: 'transaction_failed', transaction: sendResult.hash } };
+        }
+        return { ok: true, hash: sendResult.hash, returnValue: confirmed.returnValue };
+      } catch (err) {
+        this.logger.error(`open_channel submission failed: ${err}`);
+        return { ok: false, result: { success: false, errorReason: 'submission_failed' } };
       }
-      sentHash = sendResult.hash;
-    } catch (err) {
-      this.logger.error(`open_channel submission failed: ${err}`);
-      return { success: false, errorReason: 'submission_failed' };
+    });
+
+    if (!submission.ok) {
+      return submission.result;
     }
 
-    const confirmed = await this.pollForTransaction(server, sentHash);
-    if (!confirmed.success) {
-      return { success: false, errorReason: 'transaction_failed', transaction: sentHash };
-    }
-
-    const onchainChannelId = (confirmed.returnValue as bigint).toString();
+    const onchainChannelId = (submission.returnValue as bigint).toString();
     await pool.query(
       `INSERT INTO x402_channels (onchain_channel_id, payer_address, payee_address, asset_contract, payer_pubkey, deposited, resource_url)
        VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -241,7 +272,7 @@ export class ChannelService {
       [onchainChannelId, payerAddress, payeeAddress, tokenAddress, payerPubkey.toString('hex'), deposit.toString(), params.resourceUrl ?? null],
     );
 
-    return { success: true, onchainChannelId, transaction: sentHash };
+    return { success: true, onchainChannelId, transaction: submission.hash };
   }
 
   // Same client-signs-facilitator-submits pattern as openChannel — either
@@ -317,40 +348,49 @@ export class ChannelService {
       return { success: false, errorReason: 'simulation_failed' };
     }
 
-    let sentHash: string;
-    try {
-      const facilitatorAccount = await server.getAccount(signer.address);
-      const sorobanData = simResponse.transactionData.build();
-      const rebuiltTx = new TransactionBuilder(facilitatorAccount, {
-        fee: BASE_FEE,
-        networkPassphrase: Networks.TESTNET,
-        sorobanData,
-      })
-        .setTimeout(60)
-        .addOperation(Operation.invokeHostFunction(operation))
-        .build();
+    // See openChannel's identical comment — held through confirmation, not
+    // just submission.
+    const submission = await withFacilitatorSubmissionLock(async (): Promise<
+      { ok: true; hash: string } | { ok: false; result: CloseChannelResult }
+    > => {
+      try {
+        const facilitatorAccount = await server.getAccount(signer.address);
+        const sorobanData = simResponse.transactionData.build();
+        const rebuiltTx = new TransactionBuilder(facilitatorAccount, {
+          fee: BASE_FEE,
+          networkPassphrase: Networks.TESTNET,
+          sorobanData,
+        })
+          .setTimeout(60)
+          .addOperation(Operation.invokeHostFunction(operation))
+          .build();
 
-      const { signedTxXdr, error: signError } = await signer.signTransaction(rebuiltTx.toXDR(), {
-        networkPassphrase: Networks.TESTNET,
-      });
-      if (signError || !signedTxXdr) {
-        return { success: false, errorReason: 'signing_failed' };
+        const { signedTxXdr, error: signError } = await signer.signTransaction(rebuiltTx.toXDR(), {
+          networkPassphrase: Networks.TESTNET,
+        });
+        if (signError || !signedTxXdr) {
+          return { ok: false, result: { success: false, errorReason: 'signing_failed' } };
+        }
+
+        const txToSubmit = TransactionBuilder.fromXDR(signedTxXdr, Networks.TESTNET);
+        const sendResult = await server.sendTransaction(txToSubmit);
+        if (sendResult.status !== 'PENDING') {
+          return { ok: false, result: { success: false, errorReason: 'submission_failed' } };
+        }
+
+        const confirmed = await this.pollForTransaction(server, sendResult.hash);
+        if (!confirmed.success) {
+          return { ok: false, result: { success: false, errorReason: 'transaction_failed', transaction: sendResult.hash } };
+        }
+        return { ok: true, hash: sendResult.hash };
+      } catch (err) {
+        this.logger.error(`initiate_close submission failed: ${err}`);
+        return { ok: false, result: { success: false, errorReason: 'submission_failed' } };
       }
+    });
 
-      const txToSubmit = TransactionBuilder.fromXDR(signedTxXdr, Networks.TESTNET);
-      const sendResult = await server.sendTransaction(txToSubmit);
-      if (sendResult.status !== 'PENDING') {
-        return { success: false, errorReason: 'submission_failed' };
-      }
-      sentHash = sendResult.hash;
-    } catch (err) {
-      this.logger.error(`initiate_close submission failed: ${err}`);
-      return { success: false, errorReason: 'submission_failed' };
-    }
-
-    const confirmed = await this.pollForTransaction(server, sentHash);
-    if (!confirmed.success) {
-      return { success: false, errorReason: 'transaction_failed', transaction: sentHash };
+    if (!submission.ok) {
+      return submission.result;
     }
 
     await pool.query(
@@ -358,7 +398,7 @@ export class ChannelService {
       [onchainChannelId],
     );
 
-    return { success: true, transaction: sentHash };
+    return { success: true, transaction: submission.hash };
   }
 
   // checkpoint() and finalize_close() both need no party's auth entry at
@@ -422,47 +462,62 @@ export class ChannelService {
     const signer = await getFacilitatorSigner();
     const contract = new Contract(CHANNEL_CONTRACT_ID);
 
-    let sentHash: string;
-    try {
-      const account = await server.getAccount(signer.address);
-      const tx = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: Networks.TESTNET })
-        .setTimeout(60)
-        .addOperation(contract.call(functionName, ...args))
-        .build();
+    // Held through confirmation — see openChannel's identical comment on
+    // withFacilitatorSubmissionLock.
+    return withFacilitatorSubmissionLock(async (): Promise<FacilitatorCallResult> => {
+      let sentHash: string;
+      try {
+        const account = await server.getAccount(signer.address);
+        // Simulated off a disposable clone of `account`, not `account`
+        // itself: TransactionBuilder.build() mutates its source Account's
+        // sequence number in place, and this simulation-only transaction
+        // is never submitted. Building it straight off `account` would
+        // silently consume the sequence number the real transaction below
+        // still needs, so the real submission would always land two past
+        // the last confirmed sequence instead of one — a real, non-
+        // concurrency bug found while adding this lock, confirmed by a
+        // real checkpointChannel() call against live testnet failing with
+        // exactly this shape of error before this fix.
+        const simAccount = new Account(account.accountId(), account.sequenceNumber());
+        const tx = new TransactionBuilder(simAccount, { fee: BASE_FEE, networkPassphrase: Networks.TESTNET })
+          .setTimeout(60)
+          .addOperation(contract.call(functionName, ...args))
+          .build();
 
-      const sim = await server.simulateTransaction(tx);
-      if (!rpc.Api.isSimulationSuccess(sim)) {
-        return { success: false, errorReason: `${logLabel}_simulation_failed` };
+        const sim = await server.simulateTransaction(tx);
+        if (!rpc.Api.isSimulationSuccess(sim)) {
+          return { success: false, errorReason: `${logLabel}_simulation_failed` };
+        }
+        const sorobanData = sim.transactionData.build();
+        const prepared = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: Networks.TESTNET, sorobanData })
+          .setTimeout(60)
+          .addOperation(contract.call(functionName, ...args))
+          .build();
+
+        const { signedTxXdr, error: signError } = await signer.signTransaction(prepared.toXDR(), {
+          networkPassphrase: Networks.TESTNET,
+        });
+        if (signError || !signedTxXdr) {
+          return { success: false, errorReason: `${logLabel}_signing_failed` };
+        }
+
+        const txToSubmit = TransactionBuilder.fromXDR(signedTxXdr, Networks.TESTNET);
+        const sendResult = await server.sendTransaction(txToSubmit);
+        if (sendResult.status !== 'PENDING') {
+          return { success: false, errorReason: `${logLabel}_submission_failed` };
+        }
+        sentHash = sendResult.hash;
+      } catch (err) {
+        this.logger.error(`${logLabel} failed: ${err}`);
+        return { success: false, errorReason: `${logLabel}_failed` };
       }
-      const sorobanData = sim.transactionData.build();
-      const prepared = new TransactionBuilder(account, { fee: BASE_FEE, networkPassphrase: Networks.TESTNET, sorobanData })
-        .setTimeout(60)
-        .addOperation(contract.call(functionName, ...args))
-        .build();
 
-      const { signedTxXdr, error: signError } = await signer.signTransaction(prepared.toXDR(), {
-        networkPassphrase: Networks.TESTNET,
-      });
-      if (signError || !signedTxXdr) {
-        return { success: false, errorReason: `${logLabel}_signing_failed` };
+      const confirmed = await this.pollForTransaction(server, sentHash);
+      if (!confirmed.success) {
+        return { success: false, errorReason: `${logLabel}_transaction_failed`, transaction: sentHash };
       }
-
-      const txToSubmit = TransactionBuilder.fromXDR(signedTxXdr, Networks.TESTNET);
-      const sendResult = await server.sendTransaction(txToSubmit);
-      if (sendResult.status !== 'PENDING') {
-        return { success: false, errorReason: `${logLabel}_submission_failed` };
-      }
-      sentHash = sendResult.hash;
-    } catch (err) {
-      this.logger.error(`${logLabel} failed: ${err}`);
-      return { success: false, errorReason: `${logLabel}_failed` };
-    }
-
-    const confirmed = await this.pollForTransaction(server, sentHash);
-    if (!confirmed.success) {
-      return { success: false, errorReason: `${logLabel}_transaction_failed`, transaction: sentHash };
-    }
-    return { success: true, transaction: sentHash, returnValue: confirmed.returnValue };
+      return { success: true, transaction: sentHash, returnValue: confirmed.returnValue };
+    });
   }
 
   private async pollForTransaction(
