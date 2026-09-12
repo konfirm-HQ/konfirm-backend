@@ -259,6 +259,15 @@ table — and the `claim_link_seq` function — actually disappeared), then reap
 theoretical; every step above was run against a live scratch database, not inferred from reading the
 script.
 
+**In production, `migrate:up` runs automatically** via `railway.json`'s `deploy.preDeployCommand` — a
+real gap until this was added: two migrations (`014_referrals`, `015_referral_promos`) had landed in
+the codebase and their code had already been deployed and running, but nobody had a step that actually
+ran them against production Postgres, so every referral-reward cron tick failed with `relation
+"referrals" does not exist` until this was caught in the logs. Railway runs `preDeployCommand` in a
+throwaway container between build and deploy, gated — the new version never starts serving if it exits
+non-zero — so a broken migration now blocks the deploy instead of shipping code that immediately breaks
+against a schema that was never updated.
+
 ## Backups
 
 ```bash
