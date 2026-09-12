@@ -11,6 +11,7 @@
     "seed:admin": "ts-node -r tsconfig-paths/register db/seed-admin.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-kms": "^3.1131.0",
     "@nestjs/common": "^11.1.28",
     "@nestjs/core": "^11.1.28",
     "@nestjs/platform-express": "^11.1.28",

@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createEd25519Signer, STELLAR_TESTNET_CAIP2 } from '@x402/stellar';
 import type { Ed25519Signer } from '@x402/stellar';
+import { createKmsEd25519Signer } from './kms-ed25519-signer';
 
 const execFileAsync = promisify(execFile);
 
@@ -23,9 +24,20 @@ async function resolveDeployerSecretKey(): Promise<string> {
 
 let signerPromise: Promise<Ed25519Signer> | null = null;
 
+// Ships dark: FACILITATOR_KMS_KEY_ID unset means byte-for-byte the same
+// behavior as before this change (raw secret key, env var or CLI
+// identity). Setting it switches to a KMS-backed signer where the private
+// key material never exists in this process at all -- see
+// kms-ed25519-signer.ts. The on-chain address changes when this flips
+// (KMS generates its own key material, it can't import the existing raw
+// key), so this is a real cutover with its own runbook, not a toggle to
+// flip casually in production without funding the new address first.
 export function getFacilitatorSigner(): Promise<Ed25519Signer> {
   if (!signerPromise) {
-    signerPromise = resolveDeployerSecretKey().then((secretKey) => createEd25519Signer(secretKey, STELLAR_TESTNET_CAIP2));
+    const kmsKeyId = process.env.FACILITATOR_KMS_KEY_ID;
+    signerPromise = kmsKeyId
+      ? createKmsEd25519Signer(kmsKeyId)
+      : resolveDeployerSecretKey().then((secretKey) => createEd25519Signer(secretKey, STELLAR_TESTNET_CAIP2));
   }
   return signerPromise;
 }
