@@ -14,6 +14,7 @@ import { AdminAuthModule } from './admin-auth/admin-auth.module';
 import { AdminModule } from './admin/admin.module';
 import { X402Module } from './x402/x402.module';
 import { ReferralsModule } from './referrals/referrals.module';
+import { FacilitatorModule } from './facilitator/facilitator.module';
 
 const isProd = process.env.NODE_ENV === 'production';
 
@@ -65,6 +66,7 @@ const isProd = process.env.NODE_ENV === 'production';
     AdminModule,
     X402Module,
     ReferralsModule,
+    FacilitatorModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: ThrottlerGuard },

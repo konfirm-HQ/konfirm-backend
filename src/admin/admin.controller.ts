@@ -19,6 +19,7 @@ import { AdminUsersService } from './admin-users.service';
 import { AdminWalletsService } from './admin-wallets.service';
 import { AdminExchangeRateService } from './admin-exchange-rate.service';
 import { AdminReferralsService } from './admin-referrals.service';
+import { FacilitatorSpendGuardService } from '../facilitator/facilitator-spend-guard.service';
 
 const setMerchantStatusSchema = z.object({
   status: z.enum(['active', 'suspended']),
@@ -70,6 +71,7 @@ export class AdminController {
     private readonly wallets: AdminWalletsService,
     private readonly exchangeRate: AdminExchangeRateService,
     private readonly referrals: AdminReferralsService,
+    private readonly facilitatorSpendGuard: FacilitatorSpendGuardService,
   ) {}
 
   @Get('stats')
@@ -264,6 +266,23 @@ export class AdminController {
   @Get('referrals')
   listReferrals(@Query('limit') limit?: string, @Query('offset') offset?: string) {
     return this.referrals.list(limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
+  }
+
+  // --- Facilitator spend guard ---
+  // Bounds the blast radius of the facilitator's own sweep -- see
+  // FacilitatorSpendGuardService's module comment for the threat model
+  // (a compromised but still-legitimate signing process, not a leaked key).
+
+  @Get('facilitator/status')
+  getFacilitatorStatus() {
+    return this.facilitatorSpendGuard.status();
+  }
+
+  @Post('facilitator/resume')
+  async resumeFacilitator(@Req() req: AuthedAdminRequest) {
+    await this.facilitatorSpendGuard.resume();
+    await this.actions.log(req.admin.id, 'facilitator.resume', 'facilitator', 'spend-guard');
+    return { ok: true };
   }
 
   // Surfaced back to the admin UI as a recent-activity feed rather than

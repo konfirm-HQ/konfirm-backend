@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { AdminAuthModule } from '../admin-auth/admin-auth.module';
 import { WithdrawalsModule } from '../withdrawals/withdrawals.module';
+import { FacilitatorModule } from '../facilitator/facilitator.module';
 import { AdminController } from './admin.controller';
 import { AdminMerchantsService } from './admin-merchants.service';
 import { AdminActionsService } from './admin-actions.service';
@@ -21,7 +22,7 @@ import { AdminExchangeRateService } from './admin-exchange-rate.service';
 import { AdminReferralsService } from './admin-referrals.service';
 
 @Module({
-  imports: [AdminAuthModule, WithdrawalsModule],
+  imports: [AdminAuthModule, WithdrawalsModule, FacilitatorModule],
   controllers: [AdminController],
   providers: [
     AdminMerchantsService,
