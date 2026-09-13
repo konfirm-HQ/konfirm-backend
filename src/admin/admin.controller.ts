@@ -19,6 +19,7 @@ import { AdminUsersService } from './admin-users.service';
 import { AdminWalletsService } from './admin-wallets.service';
 import { AdminExchangeRateService } from './admin-exchange-rate.service';
 import { AdminReferralsService } from './admin-referrals.service';
+import { AdminBazaarService } from './admin-bazaar.service';
 import { FacilitatorSpendGuardService } from '../facilitator/facilitator-spend-guard.service';
 
 const setMerchantStatusSchema = z.object({
@@ -43,6 +44,10 @@ const blockAddressSchema = z.object({
 
 const rewindCursorSchema = z.object({
   cursor: z.string().min(1),
+});
+
+const setBazaarListingStatusSchema = z.object({
+  status: z.enum(['approved', 'rejected']),
 });
 
 // One controller for the whole admin resource surface rather than one per
@@ -71,6 +76,7 @@ export class AdminController {
     private readonly wallets: AdminWalletsService,
     private readonly exchangeRate: AdminExchangeRateService,
     private readonly referrals: AdminReferralsService,
+    private readonly bazaar: AdminBazaarService,
     private readonly facilitatorSpendGuard: FacilitatorSpendGuardService,
   ) {}
 
@@ -266,6 +272,24 @@ export class AdminController {
   @Get('referrals')
   listReferrals(@Query('limit') limit?: string, @Query('offset') offset?: string) {
     return this.referrals.list(limit ? Number(limit) : undefined, offset ? Number(offset) : undefined);
+  }
+
+  // --- Bazaar listings ---
+
+  @Get('bazaar-listings')
+  listBazaarListings(@Query('status') status?: string) {
+    return this.bazaar.list(status);
+  }
+
+  @Patch('bazaar-listings/:id/status')
+  async setBazaarListingStatus(
+    @Param('id') id: string,
+    @Body(new ZodValidationPipe(setBazaarListingStatusSchema)) body: z.infer<typeof setBazaarListingStatusSchema>,
+    @Req() req: AuthedAdminRequest,
+  ) {
+    const listing = await this.bazaar.setStatus(id, body.status, req.admin.id);
+    await this.actions.log(req.admin.id, `bazaar-listing.${body.status}`, 'bazaar_listing', id);
+    return listing;
   }
 
   // --- Facilitator spend guard ---
